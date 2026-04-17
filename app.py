@@ -287,7 +287,21 @@ def run():
         try:
             from common.utils import expand_path, parse_env_bool
             from urllib.parse import urlsplit, urlunsplit
+            import shutil
             workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+
+            migrate_from = (os.environ.get("COW_WORKSPACE_MIGRATE_FROM") or "").strip()
+            if migrate_from:
+                try:
+                    migrate_from = expand_path(migrate_from)
+                    src_tasks = os.path.join(migrate_from, "scheduler", "tasks.json")
+                    dst_tasks = os.path.join(workspace_root, "scheduler", "tasks.json")
+                    if os.path.isfile(src_tasks) and not os.path.isfile(dst_tasks):
+                        os.makedirs(os.path.dirname(dst_tasks), exist_ok=True)
+                        shutil.copy2(src_tasks, dst_tasks)
+                        logger.info(f"[App] Migrated scheduler tasks: {src_tasks} -> {dst_tasks}")
+                except Exception as e:
+                    logger.warning(f"[App] Workspace migration failed: {e}")
 
             workspace_git_url = (os.environ.get("WORKSPACE_GIT_URL") or "").strip()
             workspace_enabled = parse_env_bool("WORKSPACE_GIT_SYNC_ENABLED", default=True)
