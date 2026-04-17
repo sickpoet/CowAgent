@@ -305,7 +305,13 @@ class KnowledgeGitSync:
         except Exception as e:
             logger.warning(f"[KnowledgeGitSync] Clone failed, fallback to init: {e}")
             os.makedirs(self.knowledge_dir, exist_ok=True)
-            porcelain.init(self.knowledge_dir)
+            try:
+                porcelain.init(self.knowledge_dir)
+            except OSError as init_e:
+                git_dir = os.path.join(self.knowledge_dir, ".git")
+                if getattr(init_e, "errno", None) == 17 and os.path.exists(git_dir):
+                    return
+                raise
 
     def _calc_content_mtime(self) -> float:
         base = self.knowledge_dir
@@ -446,12 +452,24 @@ class WorkspacePartialGitSync:
                 return
             except Exception as e:
                 logger.warning(f"[WorkspacePartialGitSync] Clone failed, fallback to init: {e}")
-                porcelain.init(self.workspace_root)
+                try:
+                    porcelain.init(self.workspace_root)
+                except OSError as init_e:
+                    git_dir = os.path.join(self.workspace_root, ".git")
+                    if getattr(init_e, "errno", None) == 17 and os.path.exists(git_dir):
+                        return
+                    raise
                 return
 
         # Fallback: init a repo in-place and push selected content.
         logger.info("[WorkspacePartialGitSync] Initializing workspace repo in-place...")
-        porcelain.init(self.workspace_root)
+        try:
+            porcelain.init(self.workspace_root)
+        except OSError as init_e:
+            git_dir = os.path.join(self.workspace_root, ".git")
+            if getattr(init_e, "errno", None) == 17 and os.path.exists(git_dir):
+                return
+            raise
 
     def _is_excluded(self, rel_posix: str) -> bool:
         for pat in self.exclude:

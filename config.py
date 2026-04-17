@@ -288,6 +288,7 @@ def get_config_file_path() -> str:
 def drag_sensitive(config):
     try:
         if isinstance(config, str):
+            conf_dict: dict = json.loads(config)
             conf_dict_copy = copy.deepcopy(conf_dict)
             for key in conf_dict_copy:
                 if "key" in key or "secret" in key:

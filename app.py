@@ -286,16 +286,36 @@ def run():
 
         try:
             from common.utils import expand_path, parse_env_bool
+            from urllib.parse import urlsplit, urlunsplit
             workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
 
             workspace_git_url = (os.environ.get("WORKSPACE_GIT_URL") or "").strip()
             workspace_enabled = parse_env_bool("WORKSPACE_GIT_SYNC_ENABLED", default=True)
+
+            def _sanitize_git_url(raw: str) -> str:
+                if not raw:
+                    return ""
+                try:
+                    parts = urlsplit(raw)
+                    netloc = parts.netloc
+                    if "@" in netloc:
+                        netloc = netloc.split("@", 1)[1]
+                    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+                except Exception:
+                    return raw
+
+            logger.info(
+                f"[App] Workspace git sync: enabled={workspace_enabled}, url={_sanitize_git_url(workspace_git_url) or '(empty)'}"
+            )
             if workspace_git_url and workspace_enabled:
                 from agent.knowledge.service import WorkspacePartialGitSync
                 WorkspacePartialGitSync(workspace_root).start()
             else:
                 git_url = (os.environ.get("KNOWLEDGE_GIT_URL") or "").strip()
                 enabled = parse_env_bool("KNOWLEDGE_GIT_SYNC_ENABLED", default=True)
+                logger.info(
+                    f"[App] Knowledge git sync: enabled={enabled}, url={_sanitize_git_url(git_url) or '(empty)'}"
+                )
                 if git_url and enabled:
                     from agent.knowledge.service import KnowledgeGitSync
                     KnowledgeGitSync(workspace_root).start()
