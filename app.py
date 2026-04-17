@@ -285,15 +285,22 @@ def run():
         sigterm_handler_wrap(signal.SIGTERM)
 
         try:
-            git_url = (os.environ.get("KNOWLEDGE_GIT_URL") or "").strip()
-            enabled = (os.environ.get("KNOWLEDGE_GIT_SYNC_ENABLED") or "").strip().lower() not in ("0", "false", "no")
-            if git_url and enabled:
-                from common.utils import expand_path
-                from agent.knowledge.service import KnowledgeGitSync
-                workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
-                KnowledgeGitSync(workspace_root).start()
+            from common.utils import expand_path, parse_env_bool
+            workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+
+            workspace_git_url = (os.environ.get("WORKSPACE_GIT_URL") or "").strip()
+            workspace_enabled = parse_env_bool("WORKSPACE_GIT_SYNC_ENABLED", default=True)
+            if workspace_git_url and workspace_enabled:
+                from agent.knowledge.service import WorkspacePartialGitSync
+                WorkspacePartialGitSync(workspace_root).start()
+            else:
+                git_url = (os.environ.get("KNOWLEDGE_GIT_URL") or "").strip()
+                enabled = parse_env_bool("KNOWLEDGE_GIT_SYNC_ENABLED", default=True)
+                if git_url and enabled:
+                    from agent.knowledge.service import KnowledgeGitSync
+                    KnowledgeGitSync(workspace_root).start()
         except Exception as e:
-            logger.warning(f"[App] Knowledge git sync not started: {e}")
+            logger.warning(f"[App] Workspace/knowledge git sync not started: {e}")
 
         # Parse channel_type into a list
         raw_channel = conf().get("channel_type", "web")

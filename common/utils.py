@@ -117,6 +117,17 @@ def expand_path(path: str) -> str:
     return expanded
 
 
+def parse_env_bool(key: str, default: bool = False) -> bool:
+    if key not in os.environ:
+        return default
+    raw = (os.environ.get(key) or "").strip().lower()
+    if raw in ("", "0", "false", "no", "off", "disable", "disabled"):
+        return False
+    if raw in ("1", "true", "yes", "on", "enable", "enabled"):
+        return True
+    return default
+
+
 def get_cloud_headers(api_key: str) -> dict:
     """
     Build standard headers for LinkAI API requests,

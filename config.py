@@ -7,6 +7,7 @@ import os
 import pickle
 
 from common.log import logger
+from common.utils import expand_path
 
 # 将所有可用的配置项写在字典里, 请使用小写字母
 # 此处的配置值无实际意义，程序不会读取此处的配置，仅用于提示格式，请将配置加入到config.json中
@@ -276,10 +277,17 @@ class Config(dict):
 config = Config()
 
 
+def get_config_file_path() -> str:
+    raw = (os.environ.get("COW_CONFIG_PATH") or "").strip()
+    if raw:
+        return os.path.abspath(expand_path(raw))
+    return os.path.join(get_root(), "config.json")
+
+
+
 def drag_sensitive(config):
     try:
         if isinstance(config, str):
-            conf_dict: dict = json.loads(config)
             conf_dict_copy = copy.deepcopy(conf_dict)
             for key in conf_dict_copy:
                 if "key" in key or "secret" in key:
@@ -311,10 +319,10 @@ def load_config():
     logger.info(" \\____\\___/ \\_/\\_//_/   \\_\\__, |\\___|_| |_|\\__|")
     logger.info("                          |___/                 ")
     logger.info("")
-    config_path = "./config.json"
+    config_path = get_config_file_path()
     if not os.path.exists(config_path):
         logger.info("配置文件不存在，将使用config-template.json模板")
-        config_path = "./config-template.json"
+        config_path = os.path.join(get_root(), "config-template.json")
 
     config_str = read_file(config_path)
     logger.debug("[INIT] config str: {}".format(drag_sensitive(config_str)))
