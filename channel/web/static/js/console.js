@@ -3452,20 +3452,27 @@ document.addEventListener('DOMContentLoaded', function() {
 // =====================================================================
 // Scheduler View
 // =====================================================================
-let tasksLoaded = false;
 function loadTasksView() {
-    if (tasksLoaded) return;
     fetch('/api/scheduler').then(r => r.json()).then(data => {
-        if (data.status !== 'success') return;
         const emptyEl = document.getElementById('tasks-empty');
         const listEl = document.getElementById('tasks-list');
+        if (data.status !== 'success') {
+            emptyEl.classList.remove('hidden');
+            listEl.classList.add('hidden');
+            emptyEl.querySelector('p').textContent = data.message || (currentLang === 'zh' ? '加载失败' : 'Load failed');
+            return;
+        }
+        
         const allTasks = data.tasks || [];
         // Only show active (enabled) tasks
         const tasks = allTasks.filter(t => t.enabled !== false);
         if (tasks.length === 0) {
+            emptyEl.classList.remove('hidden');
+            listEl.classList.add('hidden');
             emptyEl.querySelector('p').textContent = currentLang === 'zh' ? '暂无定时任务' : 'No scheduled tasks';
             return;
         }
+        
         emptyEl.classList.add('hidden');
         listEl.classList.remove('hidden');
         listEl.innerHTML = '';
@@ -3473,15 +3480,26 @@ function loadTasksView() {
         tasks.forEach(task => {
             const card = document.createElement('div');
             card.className = 'bg-white dark:bg-[#1A1A1A] rounded-xl border border-slate-200 dark:border-white/10 p-4';
-            const typeLabel = task.type === 'cron'
-                ? `<span class="text-xs font-mono text-slate-400">${escapeHtml(task.cron || '')}</span>`
-                : `<span class="text-xs text-slate-400">${escapeHtml(task.type || 'once')}</span>`;
+            
+            const schedule = task.schedule || {};
+            const action = task.action || {};
+            
+            const scheduleType = schedule.type || 'once';
+            let scheduleVal = '';
+            if (scheduleType === 'cron') scheduleVal = schedule.expression || '';
+            else if (scheduleType === 'interval') scheduleVal = schedule.interval + 's';
+            else if (scheduleType === 'once') scheduleVal = schedule.at || '';
+
+            const typeLabel = `<span class="text-xs font-mono text-slate-400">${escapeHtml(scheduleType)}${scheduleVal ? ': ' + escapeHtml(scheduleVal) : ''}</span>`;
+            
             let nextRun = '--';
             if (task.next_run_at) {
-                // next_run_at is an ISO string, not a Unix timestamp
                 const d = new Date(task.next_run_at);
                 if (!isNaN(d.getTime())) nextRun = d.toLocaleString();
             }
+            
+            const description = action.content || action.task_description || task.name || task.id || '';
+            
             card.innerHTML = `
                 <div class="flex items-center gap-2 mb-2">
                     <span class="w-2 h-2 rounded-full bg-primary-400"></span>
@@ -3489,14 +3507,16 @@ function loadTasksView() {
                     <div class="flex-1"></div>
                     ${typeLabel}
                 </div>
-                <p class="text-xs text-slate-500 dark:text-slate-400 mb-2 line-clamp-2">${escapeHtml(task.prompt || task.description || '')}</p>
+                <p class="text-xs text-slate-500 dark:text-slate-400 mb-2 line-clamp-2">${escapeHtml(description)}</p>
                 <div class="flex items-center gap-4 text-xs text-slate-400 dark:text-slate-500">
                     <span><i class="fas fa-clock mr-1"></i>${currentLang === 'zh' ? '下次执行' : 'Next run'}: ${nextRun}</span>
                 </div>`;
             listEl.appendChild(card);
         });
-        tasksLoaded = true;
-    }).catch(() => {});
+    }).catch(err => {
+        const emptyEl = document.getElementById('tasks-empty');
+        if (emptyEl) emptyEl.querySelector('p').textContent = err.message || 'Network error';
+    });
 }
 
 // =====================================================================

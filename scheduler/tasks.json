@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "updated_at": "2026-04-18T04:00:00.000000",
+  "tasks": {
+    "test_task": {
+      "id": "test_task",
+      "name": "测试任务",
+      "enabled": true,
+      "created_at": "2026-04-18T04:00:00.000000",
+      "updated_at": "2026-04-18T04:00:00.000000",
+      "schedule": {
+        "type": "once",
+        "at": "+1m"
+      },
+      "action": {
+        "type": "send_message",
+        "content": "这是一条测试定时任务消息",
+        "receiver": "User",
+        "is_group": false,
+        "channel_type": "web"
+      },
+      "next_run_at": "2026-04-18T04:01:00.000000"
+    }
+  }
+}
