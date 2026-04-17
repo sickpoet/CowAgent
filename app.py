@@ -284,6 +284,17 @@ def run():
         # kill signal
         sigterm_handler_wrap(signal.SIGTERM)
 
+        try:
+            git_url = (os.environ.get("KNOWLEDGE_GIT_URL") or "").strip()
+            enabled = (os.environ.get("KNOWLEDGE_GIT_SYNC_ENABLED") or "").strip().lower() not in ("0", "false", "no")
+            if git_url and enabled:
+                from common.utils import expand_path
+                from agent.knowledge.service import KnowledgeGitSync
+                workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+                KnowledgeGitSync(workspace_root).start()
+        except Exception as e:
+            logger.warning(f"[App] Knowledge git sync not started: {e}")
+
         # Parse channel_type into a list
         raw_channel = conf().get("channel_type", "web")
 

@@ -12,10 +12,13 @@ Knowledge file layout (under workspace_root):
 
 import os
 import re
+import threading
+import time
 from pathlib import Path
 from typing import Optional
 
 from common.log import logger
+from common.package_manager import check_dulwich
 from config import conf
 
 
@@ -238,3 +241,108 @@ class KnowledgeService:
         except Exception as e:
             logger.error(f"[KnowledgeService] dispatch error: action={action}, error={e}")
             return {"action": action, "code": 500, "message": str(e), "payload": None}
+
+
+class KnowledgeGitSync:
+    def __init__(self, workspace_root: str):
+        self.workspace_root = workspace_root
+        self.knowledge_dir = os.path.join(workspace_root, "knowledge")
+        self.git_url = (os.environ.get("KNOWLEDGE_GIT_URL") or "").strip()
+        self.branch = (os.environ.get("KNOWLEDGE_GIT_BRANCH") or "main").strip() or "main"
+        self.interval_seconds = int(os.environ.get("KNOWLEDGE_GIT_SYNC_INTERVAL") or "60")
+        self.enabled = (os.environ.get("KNOWLEDGE_GIT_SYNC_ENABLED") or "").strip().lower() not in ("0", "false", "no")
+        self._stop_event = threading.Event()
+        self._last_synced_mtime = 0.0
+
+    def start(self):
+        if not self.enabled or not self.git_url:
+            return
+        t = threading.Thread(target=self._loop, daemon=True)
+        t.start()
+
+    def stop(self):
+        self._stop_event.set()
+
+    def _loop(self):
+        try:
+            self._ensure_repo_ready()
+            self._last_synced_mtime = self._calc_content_mtime()
+        except Exception as e:
+            logger.warning(f"[KnowledgeGitSync] init failed: {e}")
+
+        while not self._stop_event.is_set():
+            try:
+                self.sync_once()
+            except Exception as e:
+                logger.warning(f"[KnowledgeGitSync] sync failed: {e}")
+            self._stop_event.wait(timeout=max(5, self.interval_seconds))
+
+    def _ensure_repo_ready(self):
+        check_dulwich()
+        from dulwich import porcelain
+
+        os.makedirs(self.workspace_root, exist_ok=True)
+
+        git_dir = os.path.join(self.knowledge_dir, ".git")
+        if os.path.isdir(git_dir):
+            return
+
+        if os.path.exists(self.knowledge_dir) and os.listdir(self.knowledge_dir):
+            raise RuntimeError("knowledge dir is not empty but not a git repo")
+
+        if os.path.exists(self.knowledge_dir) and not os.path.isdir(self.knowledge_dir):
+            raise RuntimeError("knowledge path exists but is not a directory")
+
+        logger.info("[KnowledgeGitSync] Cloning knowledge repo...")
+        porcelain.clone(self.git_url, self.knowledge_dir, checkout=True)
+        logger.info("[KnowledgeGitSync] Knowledge repo cloned")
+
+    def _calc_content_mtime(self) -> float:
+        base = self.knowledge_dir
+        if not os.path.isdir(base):
+            return 0.0
+        latest = 0.0
+        for root, dirs, files in os.walk(base):
+            dirs[:] = [d for d in dirs if d != ".git" and not d.startswith(".")]
+            for f in files:
+                if f.startswith("."):
+                    continue
+                full = os.path.join(root, f)
+                try:
+                    mt = os.path.getmtime(full)
+                except OSError:
+                    continue
+                if mt > latest:
+                    latest = mt
+        return latest
+
+    def sync_once(self):
+        if not self.enabled or not self.git_url:
+            return
+
+        self._ensure_repo_ready()
+
+        current_mtime = self._calc_content_mtime()
+        if current_mtime <= self._last_synced_mtime:
+            return
+
+        check_dulwich()
+        from dulwich import porcelain
+
+        porcelain.add(self.knowledge_dir, ".")
+        msg = f"knowledge sync {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())}".encode("utf-8")
+        author = (os.environ.get("KNOWLEDGE_GIT_AUTHOR") or "CowAgent <cowagent@local>").encode("utf-8")
+        try:
+            porcelain.commit(self.knowledge_dir, msg, author=author, committer=author)
+        except Exception:
+            self._last_synced_mtime = current_mtime
+            return
+
+        try:
+            porcelain.push(self.knowledge_dir, self.git_url, self.branch)
+        except Exception as e:
+            logger.warning(f"[KnowledgeGitSync] push failed: {e}")
+            return
+
+        self._last_synced_mtime = current_mtime
+        logger.info("[KnowledgeGitSync] synced")
