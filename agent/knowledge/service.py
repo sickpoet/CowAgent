@@ -298,8 +298,14 @@ class KnowledgeGitSync:
             raise RuntimeError("knowledge path exists but is not a directory")
 
         logger.info("[KnowledgeGitSync] Cloning knowledge repo...")
-        porcelain.clone(self.git_url, self.knowledge_dir, checkout=True)
-        logger.info("[KnowledgeGitSync] Knowledge repo cloned")
+        try:
+            porcelain.clone(self.git_url, self.knowledge_dir, checkout=True)
+            logger.info("[KnowledgeGitSync] Knowledge repo cloned")
+            return
+        except Exception as e:
+            logger.warning(f"[KnowledgeGitSync] Clone failed, fallback to init: {e}")
+            os.makedirs(self.knowledge_dir, exist_ok=True)
+            porcelain.init(self.knowledge_dir)
 
     def _calc_content_mtime(self) -> float:
         base = self.knowledge_dir
@@ -434,9 +440,14 @@ class WorkspacePartialGitSync:
 
         if is_empty:
             logger.info("[WorkspacePartialGitSync] Cloning workspace repo...")
-            porcelain.clone(self.git_url, self.workspace_root, checkout=True)
-            logger.info("[WorkspacePartialGitSync] Workspace repo cloned")
-            return
+            try:
+                porcelain.clone(self.git_url, self.workspace_root, checkout=True)
+                logger.info("[WorkspacePartialGitSync] Workspace repo cloned")
+                return
+            except Exception as e:
+                logger.warning(f"[WorkspacePartialGitSync] Clone failed, fallback to init: {e}")
+                porcelain.init(self.workspace_root)
+                return
 
         # Fallback: init a repo in-place and push selected content.
         logger.info("[WorkspacePartialGitSync] Initializing workspace repo in-place...")
