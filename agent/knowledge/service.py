@@ -268,6 +268,8 @@ class KnowledgeGitSync:
     def _loop(self):
         try:
             self._ensure_repo_ready()
+            self._last_synced_mtime = 0.0
+            self.sync_once()
             self._last_synced_mtime = self._calc_content_mtime()
         except Exception as e:
             logger.warning(f"[KnowledgeGitSync] init failed: {e}")
@@ -400,6 +402,8 @@ class WorkspacePartialGitSync:
     def _loop(self):
         try:
             self._ensure_repo_ready()
+            self._last_synced_mtime = 0.0
+            self.sync_once()
             self._last_synced_mtime = self._calc_included_mtime()
         except Exception as e:
             logger.warning(f"[WorkspacePartialGitSync] init failed: {e}")
