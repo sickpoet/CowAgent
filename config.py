@@ -207,6 +207,7 @@ available_setting = {
     "agent_max_steps": 20,  # Agent模式下单次运行最大决策步数
     "enable_thinking": False,  # Whether to enable deep thinking for web channel
     "knowledge": True,  # 是否开启知识库功能
+    "database_url": "",  # Optional Postgres URL for persistent storage (e.g. Northflank Addon)
 }
 
 
