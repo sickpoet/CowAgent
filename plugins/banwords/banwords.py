@@ -24,26 +24,31 @@ class Banwords(Plugin):
     def __init__(self):
         super().__init__()
         try:
-            # load config
-            conf = super().load_config()
+            conf = super().load_config() or {}
             curdir = os.path.dirname(__file__)
             if not conf:
-                # 配置不存在则写入默认配置
-                config_path = os.path.join(curdir, "config.json")
-                if not os.path.exists(config_path):
-                    conf = {"action": "ignore"}
-                    with open(config_path, "w") as f:
-                        json.dump(conf, f, indent=4)
+                template_path = os.path.join(curdir, "config.json.template")
+                if os.path.exists(template_path):
+                    try:
+                        with open(template_path, "r", encoding="utf-8") as f:
+                            conf = json.load(f) or {}
+                    except Exception:
+                        conf = {}
+            if not conf:
+                conf = {"action": "ignore", "reply_filter": True, "reply_action": "ignore"}
 
             self.searchr = WordsSearch()
-            self.action = conf["action"]
+            self.action = conf.get("action", "ignore")
             banwords_path = os.path.join(curdir, "banwords.txt")
-            with open(banwords_path, "r", encoding="utf-8") as f:
-                words = []
-                for line in f:
-                    word = line.strip()
-                    if word:
-                        words.append(word)
+            fallback_path = os.path.join(curdir, "banwords.txt.template")
+            load_path = banwords_path if os.path.exists(banwords_path) else fallback_path
+            words = []
+            if os.path.exists(load_path):
+                with open(load_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        word = line.strip()
+                        if word:
+                            words.append(word)
             self.searchr.SetKeywords(words)
             self.handlers[Event.ON_HANDLE_CONTEXT] = self.on_handle_context
             if conf.get("reply_filter", True):
@@ -52,7 +57,7 @@ class Banwords(Plugin):
             logger.debug("[Banwords] inited")
         except Exception as e:
             logger.debug("[Banwords] init failed, ignore or see https://github.com/zhayujie/chatgpt-on-wechat/tree/master/plugins/banwords .")
-            raise e
+            self.handlers = {}
 
     def on_handle_context(self, e_context: EventContext):
         if e_context["context"].type not in [
