@@ -4,6 +4,7 @@ Agent Stream Execution Module - Multi-turn reasoning based on tool-call
 Provides streaming output, event system, and complete tool-call loop
 """
 import json
+import re
 import time
 from typing import List, Dict, Any, Optional, Callable, Tuple
 
@@ -65,6 +66,26 @@ class AgentStreamExecutor:
         
         # Track files to send (populated by read tool)
         self.files_to_send = []  # List of file metadata dicts
+
+    def _response_claims_tool_use(self, text: str) -> bool:
+        if not text:
+            return False
+        s = str(text)
+        low = s.lower()
+
+        for tool_name in (self.tools or {}).keys():
+            t = str(tool_name).lower()
+            if not t or t not in low:
+                continue
+            if re.search(rf"(通过|使用|调用)\s*[*_`]*{re.escape(t)}[*_`]*\s*(工具|tool)", low):
+                return True
+            if re.search(rf"(用|使用)\s*[*_`]*{re.escape(t)}[*_`]*\s*查", low):
+                return True
+
+        if re.search(r"(定时任务).*(实时查询|已为你查询|已成功创建|创建成功)", s):
+            return True
+
+        return False
 
     def _emit_event(self, event_type: str, data: dict = None):
         """Emit event"""
@@ -219,6 +240,7 @@ class AgentStreamExecutor:
 
         final_response = ""
         turn = 0
+        claimed_tool_retry_done = False
 
         try:
             while turn < self.max_turns:
@@ -268,6 +290,19 @@ class AgentStreamExecutor:
                             )
                             logger.info(f"Generated fallback response for empty LLM output")
                     else:
+                        if (not claimed_tool_retry_done) and self._response_claims_tool_use(assistant_msg):
+                            claimed_tool_retry_done = True
+                            self.messages.append({
+                                "role": "user",
+                                "content": [{
+                                    "type": "text",
+                                    "text": "你刚才的回答声称使用了工具，但本轮实际上没有发生任何工具调用。请纠正：如果需要使用工具，请发起真实的工具调用；否则请不要声称已查询/已创建。"
+                                }]
+                            })
+                            assistant_msg, tool_calls = self._call_llm_stream(retry_on_empty=False)
+                            final_response = assistant_msg
+                            if tool_calls:
+                                continue
                         logger.info(f"💭 {assistant_msg[:150]}{'...' if len(assistant_msg) > 150 else ''}")
                     
                     logger.debug(f"✅ 完成 (无工具调用)")
