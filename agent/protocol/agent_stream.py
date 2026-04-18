@@ -87,6 +87,57 @@ class AgentStreamExecutor:
 
         return False
 
+    def _should_force_scheduler_list(self, user_message: str) -> bool:
+        if not user_message:
+            return False
+        if "scheduler" not in (self.tools or {}):
+            return False
+        s = str(user_message).strip()
+        if not s:
+            return False
+
+        low = s.lower()
+        if ("定时任务" in s) or ("scheduler" in low) or ("schedule" in low) or ("cron" in low):
+            for kw in ("查询", "查看", "列出", "列表", "有哪些", "现在", "当前"):
+                if kw in s:
+                    return True
+        return False
+
+    def _append_tool_use_and_result(self, tool_call: Dict[str, Any], result: Dict[str, Any]) -> str:
+        self.messages.append({
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": tool_call.get("id", ""),
+                "name": tool_call.get("name", ""),
+                "input": tool_call.get("arguments", {}) or {},
+            }]
+        })
+
+        is_error = result.get("status") == "error"
+        if is_error:
+            result_content = f"Error: {result.get('result', 'Unknown error')}"
+        else:
+            result_data = result.get("result")
+            if isinstance(result_data, (dict, list)):
+                result_content = json.dumps(result_data, ensure_ascii=False)
+            else:
+                result_content = str(result_data)
+
+        tool_result_block: Dict[str, Any] = {
+            "type": "tool_result",
+            "tool_use_id": tool_call.get("id", ""),
+            "content": result_content,
+        }
+        if is_error:
+            tool_result_block["is_error"] = True
+
+        self.messages.append({
+            "role": "user",
+            "content": [tool_result_block],
+        })
+        return result_content
+
     def _emit_event(self, event_type: str, data: dict = None):
         """Emit event"""
         if self.on_event:
@@ -237,6 +288,13 @@ class AgentStreamExecutor:
         self._validate_and_fix_messages()
 
         self._emit_event("agent_start")
+
+        if self._should_force_scheduler_list(user_message):
+            tool_id = f"forced_scheduler_list_{int(time.time() * 1000)}"
+            tool_call = {"id": tool_id, "name": "scheduler", "arguments": {"action": "list"}}
+            logger.info("🔧 scheduler(action=list)")
+            result = self._execute_tool(tool_call)
+            return self._append_tool_use_and_result(tool_call, result)
 
         final_response = ""
         turn = 0
