@@ -275,6 +275,7 @@ def save_workspace_files_batch_to_db(db_url: str, rows: List[dict]) -> int:
     return _save_workspace_files_batch_to_db(db_url, rows)
 
 
+class MemoryFlushManager:
 
     """
     Manages memory flush operations.
