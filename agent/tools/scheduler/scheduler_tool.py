@@ -282,6 +282,15 @@ class SchedulerTool(BaseTool):
             return "📋 暂无定时任务"
         
         lines = [f"📋 定时任务列表 (共 {len(tasks)} 个)\n"]
+
+        def _to_short_text(value: Optional[str], max_len: int = 24) -> str:
+            s = str(value or "").strip()
+            if not s:
+                return ""
+            s = " ".join(s.split())
+            if len(s) <= max_len:
+                return s
+            return s[: max_len - 1] + "…"
         
         for task in tasks:
             status = "✅" if task.get("enabled", True) else "❌"
@@ -289,10 +298,14 @@ class SchedulerTool(BaseTool):
             next_run = task.get("next_run_at")
             dt = _parse_iso_datetime(next_run) if next_run else None
             next_run_str = _as_beijing(dt).strftime('%m-%d %H:%M') if dt else "未知"
+
+            action = task.get("action", {}) if isinstance(task.get("action"), dict) else {}
+            brief = _to_short_text(action.get("content") or action.get("task_description"))
             
             lines.append(
                 f"{status} [{task['id']}] {task['name']}\n"
                 f"   ⏰ {schedule_desc} | 下次: {next_run_str}"
+                f"{f' | 📝 {brief}' if brief else ''}"
             )
         
         return "\n".join(lines)
@@ -320,6 +333,9 @@ class SchedulerTool(BaseTool):
         last_run_str = _as_beijing(last_run_dt).strftime('%Y-%m-%d %H:%M:%S') if last_run_dt else "从未执行"
         created_dt = _parse_iso_datetime(task.get("created_at")) if task.get("created_at") else None
         created_str = _as_beijing(created_dt).strftime('%Y-%m-%d %H:%M:%S') if created_dt else "未知"
+
+        content = action.get("content") or action.get("task_description") or ""
+        content_label = "消息" if action.get("content") else ("AI任务" if action.get("task_description") else "内容")
         
         return (
             f"📋 任务详情\n\n"
@@ -328,7 +344,7 @@ class SchedulerTool(BaseTool):
             f"状态: {status}\n"
             f"调度: {schedule_desc}\n"
             f"接收者: {action.get('receiver_name', action.get('receiver'))}\n"
-            f"消息: {action.get('content')}\n"
+            f"{content_label}: {content}\n"
             f"下次执行: {next_run_str}\n"
             f"上次执行: {last_run_str}\n"
             f"创建时间: {created_str}"

@@ -3655,19 +3655,34 @@ function _renderTasksList() {
     listEl.classList.remove('hidden');
     listEl.innerHTML = '';
 
+    function _getScheduleLabel(schedule) {
+        schedule = schedule || {};
+        const scheduleType = schedule.type || 'once';
+        let scheduleVal = '';
+        if (scheduleType === 'cron') scheduleVal = schedule.expression || '';
+        else if (scheduleType === 'interval') {
+            const v = schedule.seconds ?? schedule.interval;
+            scheduleVal = (v === undefined || v === null || v === '') ? '' : String(v) + 's';
+        } else if (scheduleType === 'once') {
+            scheduleVal = schedule.run_at || schedule.at || '';
+        }
+        return { scheduleType, scheduleVal };
+    }
+
+    function _toShortText(value, maxLen) {
+        const s = String(value || '').replace(/\s+/g, ' ').trim();
+        if (!s) return '';
+        if (!maxLen || s.length <= maxLen) return s;
+        return s.slice(0, maxLen - 1) + '…';
+    }
+
     tasks.forEach(task => {
         const id = String(task.id || '');
         const enabled = task.enabled !== false;
         const schedule = task.schedule || {};
         const action = task.action || {};
 
-        const scheduleType = schedule.type || 'once';
-        let scheduleVal = '';
-        if (scheduleType === 'cron') scheduleVal = schedule.expression || '';
-        else if (scheduleType === 'interval') {
-            const v = schedule.interval;
-            scheduleVal = (v === undefined || v === null || v === '') ? '' : String(v) + 's';
-        } else if (scheduleType === 'once') scheduleVal = schedule.at || '';
+        const { scheduleType, scheduleVal } = _getScheduleLabel(schedule);
 
         const typeLabel = `<span class="text-xs font-mono text-slate-400">${escapeHtml(scheduleType)}${scheduleVal ? ': ' + escapeHtml(scheduleVal) : ''}</span>`;
 
@@ -3677,6 +3692,7 @@ function _renderTasksList() {
         }
 
         const description = action.content || action.task_description || task.name || task.id || '';
+        const shortDesc = _toShortText(description, 60);
 
         const dotCls = enabled ? 'bg-primary-400' : 'bg-slate-300 dark:bg-slate-600';
         const nameCls = enabled ? 'text-slate-700 dark:text-slate-200' : 'text-slate-400 dark:text-slate-500';
@@ -3703,7 +3719,7 @@ function _renderTasksList() {
                     ${currentLang === 'zh' ? '删除' : 'Delete'}
                 </button>
             </div>
-            <p class="text-xs text-slate-500 dark:text-slate-400 mb-2 line-clamp-2">${escapeHtml(description)}</p>
+            <p class="text-xs text-slate-500 dark:text-slate-400 mb-2 line-clamp-1" title="${escapeHtml(description)}">${escapeHtml(shortDesc)}</p>
             <div class="flex items-center gap-4 text-xs text-slate-400 dark:text-slate-500">
                 <span><i class="fas fa-clock mr-1"></i>${currentLang === 'zh' ? '下次执行' : 'Next run'}: ${nextRun}</span>
             </div>`;
@@ -3732,8 +3748,16 @@ function _renderTasksList() {
                 body: JSON.stringify({ action: 'set_enabled', id, enabled })
             })
             .then(r => r.json())
-            .then(() => loadTasksView())
-            .catch(() => loadTasksView());
+            .then(data => { if (data.status !== 'success') throw new Error(data.message || 'Update failed'); loadTasksView(); })
+            .catch(err => {
+                showConfirmDialog({
+                    title: currentLang === 'zh' ? '更新失败' : 'Update failed',
+                    message: err.message || 'Update failed',
+                    okText: 'OK',
+                    cancelText: '',
+                });
+                loadTasksView();
+            });
         });
     });
 
@@ -3773,25 +3797,50 @@ function _renderTasksList() {
 
 function loadTasksView() {
     _initTasksToolbar();
-    fetch('/api/scheduler').then(r => r.json()).then(data => {
-        const emptyEl = document.getElementById('tasks-empty');
-        const listEl = document.getElementById('tasks-list');
-        if (data.status !== 'success') {
-            emptyEl.classList.remove('hidden');
-            listEl.classList.add('hidden');
-            emptyEl.querySelector('p').textContent = data.message || (currentLang === 'zh' ? '加载失败' : 'Load failed');
-            return;
-        }
-        
-        tasksData = data.tasks || [];
-        tasksSelectedIds = new Set();
-        _setTasksSelectedCount();
-        _updateTasksDeleteSelectedBtn();
-        _renderTasksList();
-    }).catch(err => {
-        const emptyEl = document.getElementById('tasks-empty');
-        if (emptyEl) emptyEl.querySelector('p').textContent = err.message || 'Network error';
-    });
+    const emptyEl = document.getElementById('tasks-empty');
+    const listEl = document.getElementById('tasks-list');
+    if (emptyEl) {
+        emptyEl.classList.remove('hidden');
+        const p = emptyEl.querySelector('p');
+        if (p) p.textContent = currentLang === 'zh' ? '加载中...' : 'Loading...';
+    }
+    if (listEl) listEl.classList.add('hidden');
+
+    fetch('/api/scheduler')
+        .then(r => r.text().then(text => ({ ok: r.ok, status: r.status, text })))
+        .then(({ ok, status, text }) => {
+            let data = null;
+            try { data = JSON.parse(text); } catch (_) {}
+
+            if (!ok) {
+                const msg = (data && data.message) ? data.message : (text || `HTTP ${status}`);
+                if (emptyEl) {
+                    emptyEl.classList.remove('hidden');
+                    emptyEl.querySelector('p').textContent = msg;
+                }
+                if (listEl) listEl.classList.add('hidden');
+                return;
+            }
+
+            if (!data || data.status !== 'success') {
+                const msg = (data && data.message) ? data.message : (currentLang === 'zh' ? '加载失败' : 'Load failed');
+                if (emptyEl) {
+                    emptyEl.classList.remove('hidden');
+                    emptyEl.querySelector('p').textContent = msg;
+                }
+                if (listEl) listEl.classList.add('hidden');
+                return;
+            }
+
+            tasksData = data.tasks || [];
+            tasksSelectedIds = new Set();
+            _setTasksSelectedCount();
+            _updateTasksDeleteSelectedBtn();
+            _renderTasksList();
+        })
+        .catch(err => {
+            if (emptyEl) emptyEl.querySelector('p').textContent = err.message || 'Network error';
+        });
 }
 
 // =====================================================================

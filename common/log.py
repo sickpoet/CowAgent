@@ -1,6 +1,15 @@
 import logging
 import sys
 import io
+from datetime import datetime, timedelta, timezone
+
+
+_BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+class BeijingFormatter(logging.Formatter):
+    def converter(self, timestamp):
+        return datetime.fromtimestamp(timestamp, tz=_BEIJING_TZ).timetuple()
 
 
 def _reset_logger(log):
@@ -15,14 +24,14 @@ def _reset_logger(log):
         stdout = io.TextIOWrapper(stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
     console_handle = logging.StreamHandler(stdout)
     console_handle.setFormatter(
-        logging.Formatter(
+        BeijingFormatter(
             "[%(levelname)s][%(asctime)s][%(filename)s:%(lineno)d] - %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
     )
     file_handle = logging.FileHandler("run.log", encoding="utf-8")
     file_handle.setFormatter(
-        logging.Formatter(
+        BeijingFormatter(
             "[%(levelname)s][%(asctime)s][%(filename)s:%(lineno)d] - %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )

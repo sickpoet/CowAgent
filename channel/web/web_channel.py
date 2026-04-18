@@ -1593,6 +1593,8 @@ class SchedulerHandler:
                 and not str(t.get("id", "")).startswith("db_scheduler_")
                 and str(t.get("id", "")) != "db_scheduler_smoke_test"
             ]
+            backend = getattr(store, "backend", "unknown")
+            logger.info(f"[WebChannel] Scheduler GET ok backend={backend} count={len(tasks)}")
             return json.dumps({"status": "success", "tasks": tasks}, ensure_ascii=False)
         except Exception as e:
             logger.error(f"[WebChannel] Scheduler API error: {e}")
@@ -1609,6 +1611,7 @@ class SchedulerHandler:
             workspace_root = _get_workspace_root()
             store_path = os.path.join(workspace_root, "scheduler", "tasks.db")
             store = TaskStore(store_path)
+            backend = getattr(store, "backend", "unknown")
 
             if action == "set_enabled":
                 task_id = (body.get("id") or "").strip()
@@ -1616,6 +1619,7 @@ class SchedulerHandler:
                     return json.dumps({"status": "error", "message": "id required"}, ensure_ascii=False)
                 enabled = bool(body.get("enabled", True))
                 store.enable_task(task_id, enabled=enabled)
+                logger.info(f"[WebChannel] Scheduler POST ok backend={backend} action=set_enabled id={task_id} enabled={enabled}")
                 return json.dumps({"status": "success"}, ensure_ascii=False)
 
             if action == "delete":
@@ -1623,6 +1627,7 @@ class SchedulerHandler:
                 if not task_id:
                     return json.dumps({"status": "error", "message": "id required"}, ensure_ascii=False)
                 store.delete_task(task_id)
+                logger.info(f"[WebChannel] Scheduler POST ok backend={backend} action=delete id={task_id}")
                 return json.dumps({"status": "success"}, ensure_ascii=False)
 
             if action == "delete_many":
@@ -1639,6 +1644,7 @@ class SchedulerHandler:
                         deleted += 1
                     except Exception:
                         continue
+                logger.info(f"[WebChannel] Scheduler POST ok backend={backend} action=delete_many requested={len(ids)} deleted={deleted}")
                 return json.dumps({"status": "success", "deleted": deleted}, ensure_ascii=False)
 
             if action == "delete_all":
@@ -1655,6 +1661,7 @@ class SchedulerHandler:
                         deleted += 1
                     except Exception:
                         continue
+                logger.info(f"[WebChannel] Scheduler POST ok backend={backend} action=delete_all deleted={deleted}")
                 return json.dumps({"status": "success", "deleted": deleted}, ensure_ascii=False)
 
             return json.dumps({"status": "error", "message": f"unknown action: {action}"}, ensure_ascii=False)
