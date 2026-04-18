@@ -3161,6 +3161,7 @@ function submitAddChannel() {
 // =====================================================================
 let _weixinQrPollTimer = null;
 let _weixinStatusPollTimer = null;
+let _weixinQrErrorCount = 0;
 
 function stopWeixinStatusPoll() {
     if (_weixinStatusPollTimer) {
@@ -3214,6 +3215,7 @@ function stopWeixinQrPoll() {
 
 function startWeixinQrLogin() {
     stopWeixinQrPoll();
+    _weixinQrErrorCount = 0;
     fetch('/api/weixin/qrlogin')
         .then(r => r.json())
         .then(data => {
@@ -3278,9 +3280,14 @@ function pollWeixinQrStatus() {
             if (!panel) { stopWeixinQrPoll(); return; }
 
             if (data.status !== 'success') {
+                _weixinQrErrorCount += 1;
+                if (_weixinQrErrorCount >= 3) {
+                    panel.innerHTML = `<p class="text-sm text-red-500">${t('weixin_scan_fail')}: ${escapeHtml(data.message || '')}</p>`;
+                }
                 pollWeixinQrStatus();
                 return;
             }
+            _weixinQrErrorCount = 0;
 
             const qrStatus = data.qr_status;
             if (qrStatus === 'confirmed') {
@@ -3306,6 +3313,7 @@ function pollWeixinQrStatus() {
             }
         })
         .catch(() => {
+            _weixinQrErrorCount += 1;
             pollWeixinQrStatus();
         });
     }, 2000);
@@ -3323,6 +3331,9 @@ function connectWeixinAfterQr() {
             const ch = channelsData.find(c => c.name === 'weixin');
             if (ch) ch.active = true;
             setTimeout(() => renderActiveChannels(), 1500);
+        } else {
+            const panel = document.getElementById('weixin-qr-panel');
+            if (panel) panel.innerHTML = `<p class="text-sm text-red-500">${t('channels_save_error')}: ${escapeHtml(data.message || '')}</p>`;
         }
     })
     .catch(() => {});

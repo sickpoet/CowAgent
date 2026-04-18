@@ -236,9 +236,11 @@ def _save_credentials(cred_path: str, data: dict):
     db_url = _get_database_url()
     if db_url:
         _save_credentials_to_db(db_url, data)
-    os.makedirs(os.path.dirname(cred_path), exist_ok=True)
-    with open(cred_path, "w") as f:
-        json.dump(data, f, indent=2)
+    dir_name = os.path.dirname(cred_path)
+    if dir_name:
+        os.makedirs(dir_name, exist_ok=True)
+    with open(cred_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
     try:
         os.chmod(cred_path, 0o600)
     except Exception:
