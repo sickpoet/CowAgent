@@ -62,8 +62,20 @@ def _ensure_weixin_credentials_table(conn) -> None:
     )
 
 
-def _load_credentials_from_db(db_url: str) -> dict:
+def _get_credentials_id_hint() -> str:
+    env_id = (os.environ.get("WEIXIN_CREDENTIALS_ID") or "").strip()
+    if env_id:
+        return env_id
+    try:
+        return (conf().get("weixin_credentials_id") or "").strip()
+    except Exception:
+        return ""
+
+
+def _load_credentials_from_db(db_url: str, cred_id: str) -> dict:
     if not db_url:
+        return {}
+    if not cred_id:
         return {}
     try:
         import psycopg2
@@ -74,7 +86,7 @@ def _load_credentials_from_db(db_url: str) -> dict:
             cur = conn.cursor()
             cur.execute(
                 "SELECT token, base_url, bot_id, user_id FROM weixin_credentials WHERE id = %s",
-                ("default",),
+                (cred_id,),
             )
             row = cur.fetchone()
             if not row:
@@ -94,6 +106,71 @@ def _load_credentials_from_db(db_url: str) -> dict:
         return {}
 
 
+def _load_latest_credentials_from_db(db_url: str) -> dict:
+    if not db_url:
+        return {}
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url)
+        try:
+            _ensure_weixin_credentials_table(conn)
+            conn.commit()
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT token, base_url, bot_id, user_id
+                FROM weixin_credentials
+                WHERE token <> ''
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+            if not row:
+                return {}
+            token, base_url, bot_id, user_id = row
+            data = {
+                "token": token or "",
+                "base_url": base_url or "",
+                "bot_id": bot_id or "",
+                "user_id": user_id or "",
+            }
+            return data if data.get("token") else {}
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"[Weixin] Failed to load latest credentials from DB: {e}")
+        return {}
+
+
+def _select_db_ids_for_save(data: dict) -> list[str]:
+    hint = _get_credentials_id_hint()
+    bot_id = (data or {}).get("bot_id") or ""
+    user_id = (data or {}).get("user_id") or ""
+
+    ids: list[str] = []
+    if hint:
+        ids.append(hint)
+    if bot_id:
+        ids.append(f"bot:{bot_id}")
+    if user_id:
+        ids.append(f"user:{user_id}")
+
+    if not ids:
+        ids.append("default")
+    elif not hint:
+        ids.append("default")
+
+    deduped: list[str] = []
+    seen = set()
+    for item in ids:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped.append(item)
+    return deduped
+
+
 def _save_credentials_to_db(db_url: str, data: dict) -> None:
     if not db_url:
         return
@@ -103,26 +180,26 @@ def _save_credentials_to_db(db_url: str, data: dict) -> None:
         try:
             _ensure_weixin_credentials_table(conn)
             cur = conn.cursor()
-            cur.execute(
-                """
-                INSERT INTO weixin_credentials(id, token, base_url, bot_id, user_id, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (id) DO UPDATE SET
-                    token = EXCLUDED.token,
-                    base_url = EXCLUDED.base_url,
-                    bot_id = EXCLUDED.bot_id,
-                    user_id = EXCLUDED.user_id,
-                    updated_at = EXCLUDED.updated_at
-                """,
-                (
-                    "default",
-                    data.get("token", "") or "",
-                    data.get("base_url", "") or "",
-                    data.get("bot_id", "") or "",
-                    data.get("user_id", "") or "",
-                    int(time.time()),
-                ),
-            )
+            now_ts = int(time.time())
+            token = data.get("token", "") or ""
+            base_url = data.get("base_url", "") or ""
+            bot_id = data.get("bot_id", "") or ""
+            user_id = data.get("user_id", "") or ""
+
+            for cred_id in _select_db_ids_for_save(data):
+                cur.execute(
+                    """
+                    INSERT INTO weixin_credentials(id, token, base_url, bot_id, user_id, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        token = EXCLUDED.token,
+                        base_url = EXCLUDED.base_url,
+                        bot_id = EXCLUDED.bot_id,
+                        user_id = EXCLUDED.user_id,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (cred_id, token, base_url, bot_id, user_id, now_ts),
+                )
             conn.commit()
         finally:
             conn.close()
@@ -134,7 +211,15 @@ def _load_credentials(cred_path: str) -> dict:
     """Load saved credentials from JSON file."""
     db_url = _get_database_url()
     if db_url:
-        data = _load_credentials_from_db(db_url)
+        hint = _get_credentials_id_hint()
+        if hint:
+            data = _load_credentials_from_db(db_url, hint)
+            if data:
+                return data
+        data = _load_credentials_from_db(db_url, "default")
+        if data:
+            return data
+        data = _load_latest_credentials_from_db(db_url)
         if data:
             return data
     try:
@@ -203,9 +288,9 @@ class WeixinChannel(ChatChannel):
             legacy_path = os.path.expanduser("~/.weixin_cow_credentials.json")
             self._credentials_path = legacy_path if os.path.exists(legacy_path) and not os.path.exists(default_path) else default_path
 
-        if not token:
-            creds = _load_credentials(self._credentials_path)
-            token = creds.get("token", "")
+        creds = _load_credentials(self._credentials_path)
+        if creds.get("token"):
+            token = creds.get("token", "") or token
             if creds.get("base_url"):
                 base_url = creds["base_url"]
             if not token and not configured_path and legacy_path and default_path and self._credentials_path == default_path and os.path.exists(legacy_path):
