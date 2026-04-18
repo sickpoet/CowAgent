@@ -1394,9 +1394,15 @@ class WeixinQrHandler:
             if not bot_token or not bot_id:
                 return json.dumps({"status": "error", "message": "Login confirmed but missing token"})
 
-            cred_path = os.path.expanduser(
-                conf().get("weixin_credentials_path", "~/.weixin_cow_credentials.json")
-            )
+            configured_path = (conf().get("weixin_credentials_path", "") or "").strip()
+            if configured_path:
+                cred_path = os.path.expanduser(configured_path)
+            else:
+                from common.utils import expand_path
+                workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+                default_path = os.path.join(workspace_root, "weixin_credentials.json")
+                legacy_path = os.path.expanduser("~/.weixin_cow_credentials.json")
+                cred_path = legacy_path if os.path.exists(legacy_path) and not os.path.exists(default_path) else default_path
             from channel.weixin.weixin_channel import _save_credentials
             _save_credentials(cred_path, {
                 "token": bot_token,

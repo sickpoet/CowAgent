@@ -192,6 +192,8 @@ class WeixinChannel(ChatChannel):
         token = conf().get("weixin_token", "")
 
         configured_path = conf().get("weixin_credentials_path", "").strip()
+        default_path = ""
+        legacy_path = ""
         if configured_path:
             self._credentials_path = os.path.expanduser(configured_path)
         else:
@@ -206,6 +208,14 @@ class WeixinChannel(ChatChannel):
             token = creds.get("token", "")
             if creds.get("base_url"):
                 base_url = creds["base_url"]
+            if not token and not configured_path and legacy_path and default_path and self._credentials_path == default_path and os.path.exists(legacy_path):
+                legacy_creds = _load_credentials(legacy_path)
+                legacy_token = legacy_creds.get("token", "")
+                if legacy_token:
+                    token = legacy_token
+                    if legacy_creds.get("base_url"):
+                        base_url = legacy_creds["base_url"]
+                    _save_credentials(default_path, legacy_creds)
 
         if not token:
             token, base_url = self._login_with_retry(base_url)
