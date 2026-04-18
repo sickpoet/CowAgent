@@ -6,6 +6,10 @@ Workspace Management - 工作空间管理模块
 
 from __future__ import annotations
 import os
+import threading
+import time
+import base64
+import hashlib
 from typing import List, Optional, Dict
 from dataclasses import dataclass
 
@@ -105,6 +109,250 @@ def ensure_workspace(workspace_dir: str, create_templates: bool = True) -> Works
         memory_path=memory_path,
         memory_dir=memory_dir,
     )
+
+
+_workspace_backup_lock = threading.Lock()
+_workspace_backup_last_hashes: Dict[str, str] = {}
+
+
+def restore_workspace_from_db(workspace_dir: str) -> dict:
+    db_url = (os.environ.get("DATABASE_URL") or "").strip()
+    if not db_url:
+        return {"enabled": False, "restored": 0, "overwritten": 0, "skipped": 0, "total": 0}
+
+    os.makedirs(workspace_dir, exist_ok=True)
+    try:
+        from agent.memory.summarizer import _load_all_markdown_from_db
+        rows = _load_all_markdown_from_db(db_url)
+    except Exception as e:
+        return {"enabled": True, "restored": 0, "overwritten": 0, "skipped": 0, "total": 0, "error": str(e)}
+
+    allowed_prefixes = ("memory/", "knowledge/", "skills/")
+    allowed_root = {
+        DEFAULT_AGENT_FILENAME,
+        DEFAULT_USER_FILENAME,
+        DEFAULT_RULE_FILENAME,
+        DEFAULT_MEMORY_FILENAME,
+        DEFAULT_BOOTSTRAP_FILENAME,
+    }
+
+    restored = 0
+    overwritten = 0
+    skipped = 0
+    total = 0
+
+    workspace_root = os.path.realpath(workspace_dir)
+
+    for row in rows:
+        rel_path = (row.get("path") or "").replace("\\", "/").lstrip("/")
+        if not rel_path:
+            continue
+        if rel_path not in allowed_root and not rel_path.startswith(allowed_prefixes):
+            continue
+        total += 1
+
+        target = os.path.realpath(os.path.join(workspace_root, rel_path))
+        if target != workspace_root and not target.startswith(workspace_root + os.sep):
+            skipped += 1
+            continue
+
+        content = row.get("content") or ""
+        encoding = (row.get("encoding") or "utf-8").strip().lower()
+        is_binary = bool(row.get("is_binary") or False)
+
+        if is_binary or encoding == "base64":
+            try:
+                data = base64.b64decode(content.encode("utf-8"))
+            except Exception:
+                skipped += 1
+                continue
+        else:
+            data = content.encode("utf-8")
+
+        try:
+            if os.path.exists(target):
+                try:
+                    if os.path.isfile(target) and os.path.getsize(target) == 0 and data:
+                        with open(target, "wb") as f:
+                            f.write(data)
+                        overwritten += 1
+                    else:
+                        existing_text = ""
+                        try:
+                            with open(target, "r", encoding="utf-8") as f:
+                                existing_text = f.read()
+                        except Exception:
+                            existing_text = ""
+                        if _is_workspace_template_file(rel_path, existing_text) and data:
+                            with open(target, "wb") as f:
+                                f.write(data)
+                            overwritten += 1
+                        else:
+                            skipped += 1
+                    continue
+                except Exception:
+                    skipped += 1
+                    continue
+
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "wb") as f:
+                f.write(data)
+            restored += 1
+        except Exception:
+            skipped += 1
+
+    if restored or overwritten:
+        logger.info(
+            f"[WorkspacePersist] Restored from DB: restored={restored}, overwritten={overwritten}, skipped={skipped}, total={total}"
+        )
+
+    return {
+        "enabled": True,
+        "restored": restored,
+        "overwritten": overwritten,
+        "skipped": skipped,
+        "total": total,
+    }
+
+
+def backup_workspace_to_db(workspace_dir: str) -> dict:
+    db_url = (os.environ.get("DATABASE_URL") or "").strip()
+    if not db_url:
+        return {"enabled": False, "saved": 0, "scanned": 0, "skipped": 0}
+
+    max_bytes = int((os.environ.get("COW_WORKSPACE_BACKUP_MAX_BYTES") or "2000000").strip() or "2000000")
+    include_dirs = ["memory", "knowledge", "skills"]
+    include_root_files = [
+        DEFAULT_AGENT_FILENAME,
+        DEFAULT_USER_FILENAME,
+        DEFAULT_RULE_FILENAME,
+        DEFAULT_MEMORY_FILENAME,
+        DEFAULT_BOOTSTRAP_FILENAME,
+    ]
+
+    workspace_root = os.path.realpath(workspace_dir)
+    paths: List[str] = []
+    for name in include_root_files:
+        p = os.path.join(workspace_root, name)
+        if os.path.isfile(p):
+            paths.append(p)
+
+    for d in include_dirs:
+        base = os.path.join(workspace_root, d)
+        if not os.path.isdir(base):
+            continue
+        for root, dirnames, filenames in os.walk(base):
+            dirnames[:] = [
+                dn
+                for dn in dirnames
+                if not dn.startswith(".") and dn != "__pycache__"
+            ]
+            for fn in filenames:
+                if fn.startswith("."):
+                    continue
+                full = os.path.join(root, fn)
+                if os.path.isfile(full):
+                    paths.append(full)
+
+    rows = []
+    scanned = 0
+    skipped = 0
+    saved = 0
+
+    for full_path in paths:
+        try:
+            real = os.path.realpath(full_path)
+            if real != workspace_root and not real.startswith(workspace_root + os.sep):
+                skipped += 1
+                continue
+            size = os.path.getsize(real)
+            scanned += 1
+            if size <= 0:
+                continue
+            if size > max_bytes:
+                skipped += 1
+                continue
+
+            with open(real, "rb") as f:
+                data = f.read()
+
+            rel_path = os.path.relpath(real, workspace_root).replace("\\", "/")
+            content_hash = hashlib.sha256(data).hexdigest()
+
+            with _workspace_backup_lock:
+                last = _workspace_backup_last_hashes.get(rel_path)
+                if last == content_hash:
+                    continue
+
+            try:
+                text = data.decode("utf-8")
+                encoding = "utf-8"
+                is_binary = False
+                content = text
+            except Exception:
+                encoding = "base64"
+                is_binary = True
+                content = base64.b64encode(data).decode("utf-8")
+
+            category = "workspace"
+            if rel_path.startswith("memory/") or rel_path == "MEMORY.md":
+                category = "memory"
+            elif rel_path.startswith("knowledge/"):
+                category = "knowledge"
+            elif rel_path.startswith("skills/"):
+                category = "skills"
+
+            rows.append(
+                {
+                    "path": rel_path,
+                    "content": content,
+                    "encoding": encoding,
+                    "is_binary": is_binary,
+                    "category": category,
+                    "content_hash": content_hash,
+                    "size": len(data),
+                }
+            )
+        except Exception:
+            skipped += 1
+
+    if rows:
+        try:
+            from agent.memory.summarizer import save_workspace_files_batch_to_db
+            saved = save_workspace_files_batch_to_db(db_url, rows)
+            if saved:
+                with _workspace_backup_lock:
+                    for r in rows:
+                        p = (r.get("path") or "").replace("\\", "/")
+                        h = r.get("content_hash") or ""
+                        if p and h:
+                            _workspace_backup_last_hashes[p] = h
+        except Exception:
+            saved = 0
+
+    return {"enabled": True, "saved": saved, "scanned": scanned, "skipped": skipped}
+
+
+def _is_workspace_template_file(rel_path: str, content: str) -> bool:
+    p = (rel_path or "").replace("\\", "/").lstrip("/")
+    c = (content or "").strip()
+    if not c:
+        return True
+    if p == DEFAULT_AGENT_FILENAME:
+        return c == (_get_agent_template() or "").strip()
+    if p == DEFAULT_USER_FILENAME:
+        return c == (_get_user_template() or "").strip()
+    if p == DEFAULT_RULE_FILENAME:
+        return c == (_get_rule_template() or "").strip()
+    if p == DEFAULT_MEMORY_FILENAME:
+        return c == (_get_memory_template() or "").strip()
+    if p == DEFAULT_BOOTSTRAP_FILENAME:
+        return c == (_get_bootstrap_template() or "").strip()
+    if p == "knowledge/index.md":
+        return c == (_get_knowledge_index_template() or "").strip()
+    if p == "knowledge/log.md":
+        return c == (_get_knowledge_log_template() or "").strip()
+    return False
 
 
 def load_context_files(workspace_dir: str, files_to_load: Optional[List[str]] = None) -> List[ContextFile]:

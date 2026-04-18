@@ -61,6 +61,27 @@ class AgentInitializer:
         
         # Load environment variables
         self._load_env_file()
+
+        if not getattr(self.agent_bridge, "_workspace_restore_done", False):
+            self.agent_bridge._workspace_restore_done = True
+            try:
+                from agent.prompt.workspace import restore_workspace_from_db
+                restore_result = restore_workspace_from_db(workspace_root)
+                if session_id is None:
+                    enabled = bool(restore_result.get("enabled"))
+                    if enabled:
+                        logger.info(
+                            "[WorkspacePersist] Restore on start: "
+                            f"restored={restore_result.get('restored', 0)}, "
+                            f"overwritten={restore_result.get('overwritten', 0)}, "
+                            f"skipped={restore_result.get('skipped', 0)}, "
+                            f"total={restore_result.get('total', 0)}"
+                        )
+                    else:
+                        logger.info("[WorkspacePersist] Restore on start disabled (DATABASE_URL not set)")
+            except Exception as e:
+                if session_id is None:
+                    logger.warning(f"[WorkspacePersist] Restore on start failed: {e}")
         
         # Initialize workspace
         from agent.prompt import ensure_workspace, load_context_files, PromptBuilder
@@ -126,6 +147,8 @@ class AgentInitializer:
 
         # Start daily memory flush timer (once, on first agent init regardless of session)
         self._start_daily_flush_timer()
+
+        self._start_workspace_backup_timer(workspace_root)
 
         return agent
 
@@ -401,6 +424,11 @@ class AgentInitializer:
     
     def _initialize_scheduler(self, tools: List, session_id: Optional[str] = None):
         """Initialize scheduler service if needed"""
+        raw_enabled = (os.environ.get("COW_SCHEDULER_ENABLED") or "true").strip().lower()
+        if raw_enabled in ("0", "false", "no", "off"):
+            if session_id is None:
+                logger.info("[AgentInitializer] Scheduler service disabled by COW_SCHEDULER_ENABLED")
+            return
         if not self.agent_bridge.scheduler_initialized:
             try:
                 from agent.tools.scheduler.integration import init_scheduler
@@ -554,6 +582,9 @@ class AgentInitializer:
 
     def _start_daily_flush_timer(self):
         """Start a background thread that flushes all agents' memory daily at 23:55."""
+        raw_enabled = (os.environ.get("COW_DAILY_FLUSH_ENABLED") or "true").strip().lower()
+        if raw_enabled in ("0", "false", "no", "off"):
+            return
         if getattr(self.agent_bridge, '_daily_flush_started', False):
             return
         self.agent_bridge._daily_flush_started = True
@@ -580,6 +611,46 @@ class AgentInitializer:
                     time.sleep(3600)
 
         t = threading.Thread(target=_daily_flush_loop, daemon=True)
+        t.start()
+
+    def _start_workspace_backup_timer(self, workspace_root: str):
+        db_url = (os.environ.get("DATABASE_URL") or "").strip()
+        if not db_url:
+            return
+
+        raw_enabled = (os.environ.get("COW_WORKSPACE_BACKUP_ENABLED") or "true").strip().lower()
+        if raw_enabled in ("0", "false", "no", "off"):
+            return
+
+        if getattr(self.agent_bridge, "_workspace_backup_started", False):
+            return
+        self.agent_bridge._workspace_backup_started = True
+
+        try:
+            interval_sec = int((os.environ.get("COW_WORKSPACE_BACKUP_INTERVAL_SEC") or "300").strip() or "300")
+        except Exception:
+            interval_sec = 300
+        interval_sec = max(30, interval_sec)
+
+        import threading
+
+        def _loop():
+            while True:
+                try:
+                    from agent.prompt.workspace import backup_workspace_to_db
+                    result = backup_workspace_to_db(workspace_root)
+                    if result.get("saved"):
+                        logger.info(
+                            "[WorkspacePersist] Periodic backup: "
+                            f"saved={result.get('saved', 0)}, "
+                            f"scanned={result.get('scanned', 0)}, "
+                            f"skipped={result.get('skipped', 0)}"
+                        )
+                except Exception as e:
+                    logger.warning(f"[WorkspacePersist] Periodic backup failed: {e}")
+                time.sleep(interval_sec)
+
+        t = threading.Thread(target=_loop, daemon=True)
         t.start()
 
     def _flush_all_agents(self):

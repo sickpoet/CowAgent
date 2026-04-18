@@ -109,10 +109,36 @@ def _ensure_memory_markdown_table(conn) -> None:
         CREATE TABLE IF NOT EXISTS memory_markdown_files (
             path TEXT PRIMARY KEY,
             content TEXT NOT NULL DEFAULT '',
-            updated_at BIGINT NOT NULL
+            updated_at BIGINT NOT NULL,
+            category TEXT NOT NULL DEFAULT 'memory',
+            encoding TEXT NOT NULL DEFAULT 'utf-8',
+            is_binary BOOLEAN NOT NULL DEFAULT FALSE,
+            content_hash TEXT NOT NULL DEFAULT '',
+            size BIGINT NOT NULL DEFAULT 0
         )
         """
     )
+    cur.execute("ALTER TABLE memory_markdown_files ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'memory'")
+    cur.execute("ALTER TABLE memory_markdown_files ADD COLUMN IF NOT EXISTS encoding TEXT NOT NULL DEFAULT 'utf-8'")
+    cur.execute("ALTER TABLE memory_markdown_files ADD COLUMN IF NOT EXISTS is_binary BOOLEAN NOT NULL DEFAULT FALSE")
+    cur.execute("ALTER TABLE memory_markdown_files ADD COLUMN IF NOT EXISTS content_hash TEXT NOT NULL DEFAULT ''")
+    cur.execute("ALTER TABLE memory_markdown_files ADD COLUMN IF NOT EXISTS size BIGINT NOT NULL DEFAULT 0")
+
+
+def _infer_category_from_path(rel_path: str) -> str:
+    p = (rel_path or "").replace("\\", "/").lstrip("/")
+    if p.startswith("knowledge/"):
+        return "knowledge"
+    if p.startswith("skills/"):
+        return "skills"
+    if p.startswith("memory/") or p == "MEMORY.md":
+        return "memory"
+    return "workspace"
+
+
+def _sha256_hex(data: bytes) -> str:
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
 
 
 def _save_markdown_to_db(db_url: str, rel_path: str, content: str) -> None:
@@ -124,21 +150,91 @@ def _save_markdown_to_db(db_url: str, rel_path: str, content: str) -> None:
         try:
             _ensure_memory_markdown_table(conn)
             cur = conn.cursor()
+            normalized_path = (rel_path or "").replace("\\", "/").lstrip("/")
+            content_text = content or ""
+            content_bytes = content_text.encode("utf-8")
+            category = _infer_category_from_path(normalized_path)
             cur.execute(
                 """
-                INSERT INTO memory_markdown_files(path, content, updated_at)
-                VALUES (%s, %s, %s)
+                INSERT INTO memory_markdown_files(path, content, updated_at, category, encoding, is_binary, content_hash, size)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (path) DO UPDATE SET
                     content = EXCLUDED.content,
-                    updated_at = EXCLUDED.updated_at
+                    updated_at = EXCLUDED.updated_at,
+                    category = EXCLUDED.category,
+                    encoding = EXCLUDED.encoding,
+                    is_binary = EXCLUDED.is_binary,
+                    content_hash = EXCLUDED.content_hash,
+                    size = EXCLUDED.size
                 """,
-                (rel_path, content or "", int(time.time())),
+                (
+                    normalized_path,
+                    content_text,
+                    int(time.time()),
+                    category,
+                    "utf-8",
+                    False,
+                    _sha256_hex(content_bytes),
+                    len(content_bytes),
+                ),
             )
             conn.commit()
         finally:
             conn.close()
     except Exception as e:
         logger.warning(f"[MemoryFlush] Failed to save markdown to DB: {e}")
+
+
+def _save_workspace_files_batch_to_db(db_url: str, rows: List[dict]) -> int:
+    if not db_url or not rows:
+        return 0
+    try:
+        import psycopg2
+        import psycopg2.extras
+
+        conn = psycopg2.connect(db_url)
+        try:
+            _ensure_memory_markdown_table(conn)
+            cur = conn.cursor()
+            now_ts = int(time.time())
+            payload = []
+            for r in rows:
+                path = (r.get("path") or "").replace("\\", "/").lstrip("/")
+                if not path:
+                    continue
+                content = r.get("content") or ""
+                encoding = r.get("encoding") or "utf-8"
+                is_binary = bool(r.get("is_binary") or False)
+                category = r.get("category") or _infer_category_from_path(path)
+                content_hash = r.get("content_hash") or ""
+                size = int(r.get("size") or 0)
+                payload.append((path, content, now_ts, category, encoding, is_binary, content_hash, size))
+            if not payload:
+                return 0
+            psycopg2.extras.execute_batch(
+                cur,
+                """
+                INSERT INTO memory_markdown_files(path, content, updated_at, category, encoding, is_binary, content_hash, size)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (path) DO UPDATE SET
+                    content = EXCLUDED.content,
+                    updated_at = EXCLUDED.updated_at,
+                    category = EXCLUDED.category,
+                    encoding = EXCLUDED.encoding,
+                    is_binary = EXCLUDED.is_binary,
+                    content_hash = EXCLUDED.content_hash,
+                    size = EXCLUDED.size
+                """,
+                payload,
+                page_size=200,
+            )
+            conn.commit()
+            return len(payload)
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"[MemoryFlush] Failed to batch-save workspace files to DB: {e}")
+        return 0
 
 
 def _load_all_markdown_from_db(db_url: str) -> List[dict]:
@@ -151,17 +247,32 @@ def _load_all_markdown_from_db(db_url: str) -> List[dict]:
             _ensure_memory_markdown_table(conn)
             conn.commit()
             cur = conn.cursor()
-            cur.execute("SELECT path, content, updated_at FROM memory_markdown_files")
+            cur.execute("SELECT path, content, updated_at, category, encoding, is_binary, content_hash, size FROM memory_markdown_files")
             rows = cur.fetchall() or []
             out = []
-            for p, c, ts in rows:
-                out.append({"path": p or "", "content": c or "", "updated_at": int(ts or 0)})
+            for p, c, ts, cat, enc, is_bin, ch, size in rows:
+                out.append(
+                    {
+                        "path": p or "",
+                        "content": c or "",
+                        "updated_at": int(ts or 0),
+                        "category": cat or _infer_category_from_path(p or ""),
+                        "encoding": enc or "utf-8",
+                        "is_binary": bool(is_bin or False),
+                        "content_hash": ch or "",
+                        "size": int(size or 0),
+                    }
+                )
             return out
         finally:
             conn.close()
     except Exception as e:
         logger.warning(f"[MemoryFlush] Failed to load markdown from DB: {e}")
         return []
+
+
+def save_workspace_files_batch_to_db(db_url: str, rows: List[dict]) -> int:
+    return _save_workspace_files_batch_to_db(db_url, rows)
 
 
 
