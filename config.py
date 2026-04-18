@@ -322,11 +322,17 @@ def load_config():
     logger.info("                          |___/                 ")
     logger.info("")
     config_path = get_config_file_path()
-    if not os.path.exists(config_path):
-        logger.info("配置文件不存在，将使用config-template.json模板")
-        config_path = os.path.join(get_root(), "config-template.json")
+    template_path = os.path.join(get_root(), "config-template.json")
 
-    config_str = read_file(config_path)
+    if os.path.exists(config_path):
+        config_str = read_file(config_path)
+    elif os.path.exists(template_path):
+        logger.info("配置文件不存在，将使用config-template.json模板")
+        config_str = read_file(template_path)
+    else:
+        logger.warning("配置文件不存在，将仅使用环境变量")
+        config_str = "{}"
+
     logger.debug("[INIT] config str: {}".format(drag_sensitive(config_str)))
 
     # 将json字符串反序列化为dict类型
