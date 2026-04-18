@@ -24,16 +24,19 @@ ADD . ${BUILD_PREFIX}
 
 # All heavy installs + user creation in ONE layer to avoid chown duplication
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bash ffmpeg espeak libavcodec-extra \
+    && apt-get install -y --no-install-recommends bash ffmpeg espeak passwd ca-certificates \
+    && (apt-get install -y --no-install-recommends libavcodec-extra \
+        || apt-get install -y --no-install-recommends libavcodec-extra58 \
+        || true) \
     && cd ${BUILD_PREFIX} \
     && cp config-template.json config.json \
-    && /usr/local/bin/python -m pip install --no-cache --upgrade pip \
-    && pip install --no-cache -r requirements.txt \
-    && pip install --no-cache -r requirements-optional.txt \
-    && pip install --no-cache -e . \
+    && /usr/local/bin/python -m pip install --no-cache --upgrade pip setuptools wheel \
+    && python -m pip install --no-cache -r requirements.txt \
+    && python -m pip install --no-cache -r requirements-optional.txt \
+    && python -m pip install --no-cache -e . \
     && if [ "$INSTALL_BROWSER" = "true" ]; then \
-        apt-get install -y --no-install-recommends fonts-wqy-zenhei \
-        && pip install --no-cache "playwright==1.52.0" \
+        (apt-get install -y --no-install-recommends fonts-wqy-zenhei || true) \
+        && python -m pip install --no-cache "playwright==1.52.0" \
         && python -m playwright install-deps chromium \
         && mkdir -p /app/ms-playwright \
         && python -m playwright install chromium; \
