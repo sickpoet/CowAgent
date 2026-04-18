@@ -35,8 +35,8 @@ RUN apt-get update \
         && python -m playwright install-deps chromium \
         && mkdir -p /app/ms-playwright \
         && if [ "$USE_CN_MIRROR" = "true" ]; then \
-            PLAYWRIGHT_DOWNLOAD_HOST=https://registry.npmmirror.com/-/binary/playwright \
-            python -m playwright install chromium; \
+            export PLAYWRIGHT_DOWNLOAD_HOST="https://registry.npmmirror.com/-/binary/playwright" \
+            && python -m playwright install chromium; \
         else \
             python -m playwright install chromium; \
         fi; \
