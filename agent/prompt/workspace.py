@@ -317,6 +317,7 @@ def backup_workspace_to_db(workspace_dir: str) -> dict:
             skipped += 1
 
     if rows:
+        expected = len(rows)
         try:
             from agent.memory.summarizer import save_workspace_files_batch_to_db
             saved = save_workspace_files_batch_to_db(db_url, rows)
@@ -329,6 +330,8 @@ def backup_workspace_to_db(workspace_dir: str) -> dict:
                             _workspace_backup_last_hashes[p] = h
         except Exception:
             saved = 0
+        if saved != expected:
+            logger.warning(f"[WorkspacePersist] Backup mismatch: expected={expected} saved={saved}")
 
     return {"enabled": True, "saved": saved, "scanned": scanned, "skipped": skipped}
 

@@ -16,6 +16,7 @@ from typing import Optional, Callable, Any, List, Dict
 from pathlib import Path
 from datetime import datetime
 from common.log import logger
+from common.utils import parse_env_bool
 
 
 SUMMARIZE_SYSTEM_PROMPT = """你是一个对话记录助手。请将对话内容归纳为当天的日常记录。
@@ -154,6 +155,8 @@ def _save_markdown_to_db(db_url: str, rel_path: str, content: str) -> None:
             content_text = content or ""
             content_bytes = content_text.encode("utf-8")
             category = _infer_category_from_path(normalized_path)
+            content_hash = _sha256_hex(content_bytes)
+            size = len(content_bytes)
             cur.execute(
                 """
                 INSERT INTO memory_markdown_files(path, content, updated_at, category, encoding, is_binary, content_hash, size)
@@ -174,11 +177,22 @@ def _save_markdown_to_db(db_url: str, rel_path: str, content: str) -> None:
                     category,
                     "utf-8",
                     False,
-                    _sha256_hex(content_bytes),
-                    len(content_bytes),
+                    content_hash,
+                    size,
                 ),
             )
             conn.commit()
+            if parse_env_bool("COW_DB_VERIFY", True):
+                cur.execute(
+                    "SELECT content_hash, size FROM memory_markdown_files WHERE path = %s",
+                    (normalized_path,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise RuntimeError("row missing after save")
+                v_hash, v_size = row
+                if (v_hash or "") != content_hash or int(v_size or 0) != size:
+                    raise RuntimeError("row mismatch after save")
         finally:
             conn.close()
     except Exception as e:
@@ -229,6 +243,20 @@ def _save_workspace_files_batch_to_db(db_url: str, rows: List[dict]) -> int:
                 page_size=200,
             )
             conn.commit()
+            if parse_env_bool("COW_DB_VERIFY", True):
+                sample = []
+                if payload:
+                    sample.append(payload[0])
+                if len(payload) > 1:
+                    sample.append(payload[-1])
+                for p, _, _, _, _, _, ch, size in sample:
+                    cur.execute("SELECT content_hash, size FROM memory_markdown_files WHERE path = %s", (p,))
+                    row = cur.fetchone()
+                    if not row:
+                        raise RuntimeError("row missing after batch save")
+                    v_hash, v_size = row
+                    if (v_hash or "") != (ch or "") or int(v_size or 0) != int(size or 0):
+                        raise RuntimeError("row mismatch after batch save")
             return len(payload)
         finally:
             conn.close()

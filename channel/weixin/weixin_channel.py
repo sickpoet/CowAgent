@@ -24,6 +24,7 @@ from channel.weixin.weixin_message import WeixinMessage
 from common.expired_dict import ExpiredDict
 from common.log import logger
 from common.singleton import singleton
+from common.utils import parse_env_bool
 from config import conf
 
 MAX_CONSECUTIVE_FAILURES = 3
@@ -196,7 +197,8 @@ def _save_credentials_to_db(db_url: str, data: dict) -> bool:
             bot_id = data.get("bot_id", "") or ""
             user_id = data.get("user_id", "") or ""
 
-            for cred_id in _select_db_ids_for_save(data):
+            saved_ids = _select_db_ids_for_save(data)
+            for cred_id in saved_ids:
                 cur.execute(
                     """
                     INSERT INTO weixin_credentials(id, token, base_url, bot_id, user_id, updated_at)
@@ -211,6 +213,27 @@ def _save_credentials_to_db(db_url: str, data: dict) -> bool:
                     (cred_id, token, base_url, bot_id, user_id, now_ts),
                 )
             conn.commit()
+
+            if parse_env_bool("COW_DB_VERIFY", True):
+                for cred_id in saved_ids:
+                    cur.execute(
+                        "SELECT token, base_url, bot_id, user_id FROM weixin_credentials WHERE id = %s",
+                        (cred_id,),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        logger.warning(f"[Weixin] Credentials DB verify failed: id={cred_id} missing after save")
+                        return False
+                    v_token, v_base_url, v_bot_id, v_user_id = row
+                    if (v_token or "") != token or (v_base_url or "") != base_url:
+                        logger.warning(f"[Weixin] Credentials DB verify failed: id={cred_id} mismatch after save")
+                        return False
+                    if bot_id and (v_bot_id or "") != bot_id:
+                        logger.warning(f"[Weixin] Credentials DB verify failed: id={cred_id} bot_id mismatch after save")
+                        return False
+                    if user_id and (v_user_id or "") != user_id:
+                        logger.warning(f"[Weixin] Credentials DB verify failed: id={cred_id} user_id mismatch after save")
+                        return False
             return True
         finally:
             conn.close()

@@ -12,7 +12,7 @@ from agent.tools.base_tool import BaseTool, ToolResult
 from bridge.context import Context, ContextType
 from bridge.reply import Reply, ReplyType
 from common.log import logger
-from common.utils import expand_path
+from common.utils import expand_path, parse_env_bool
 from config import conf
 
 try:
@@ -262,7 +262,7 @@ class SchedulerTool(BaseTool):
             persisted = self.task_store.get_task(task_id)
         except Exception:
             persisted = None
-        if not persisted:
+        if parse_env_bool("COW_DB_VERIFY", True) and not persisted:
             return f"错误: 任务创建后未能从存储中读回确认 (id={task_id}, backend={backend})"
         
         # Format response
