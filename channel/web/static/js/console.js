@@ -3088,9 +3088,9 @@ function onAddChannelSelect(chName) {
         actions.classList.add('hidden');
         fieldsContainer.innerHTML = `
             <div id="weixin-qr-panel" class="flex flex-col items-center py-4">
-                <p class="text-sm text-slate-500 dark:text-slate-400 mb-4">${t('weixin_scan_loading')}</p>
+                <p class="text-sm text-slate-500 dark:text-slate-400 mb-4">${currentLang === 'zh' ? '正在使用已保存凭证连接...' : 'Connecting with saved credentials...'}</p>
             </div>`;
-        startWeixinQrLogin();
+        connectWeixinWithSavedCredsOrQr();
         return;
     }
 
@@ -3162,6 +3162,62 @@ function submitAddChannel() {
 let _weixinQrPollTimer = null;
 let _weixinStatusPollTimer = null;
 let _weixinQrErrorCount = 0;
+
+function connectWeixinWithSavedCredsOrQr() {
+    const panel = document.getElementById('weixin-qr-panel');
+    if (panel) {
+        panel.innerHTML = `<p class="text-sm text-slate-500 dark:text-slate-400 mb-4">${currentLang === 'zh' ? '正在使用已保存凭证连接...' : 'Connecting with saved credentials...'}</p>`;
+    }
+
+    fetch('/api/channels', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'connect', channel: 'weixin', config: {} })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.status !== 'success') {
+            const p = document.getElementById('weixin-qr-panel');
+            if (p) p.innerHTML = `<p class="text-sm text-red-500">${t('channels_save_error')}: ${escapeHtml(data.message || '')}</p>`;
+            return;
+        }
+
+        const ch = channelsData.find(c => c.name === 'weixin');
+        if (ch) ch.active = true;
+
+        fetch('/api/channels')
+            .then(r => r.text().then(text => ({ ok: r.ok, status: r.status, text })))
+            .then(({ ok, text }) => {
+                if (!ok) {
+                    startWeixinQrLogin();
+                    return;
+                }
+                let fresh = null;
+                try { fresh = JSON.parse(text); } catch (_) {}
+                const wx = fresh && fresh.status === 'success'
+                    ? (fresh.channels || []).find(c => c.name === 'weixin')
+                    : null;
+
+                if (wx && wx.active && wx.login_status === 'logged_in') {
+                    channelsData = fresh.channels || channelsData;
+                    closeAddChannelPanel();
+                    renderActiveChannels();
+                    return;
+                }
+
+                startWeixinQrLogin();
+                startWeixinActiveStatusPoll();
+            })
+            .catch(() => {
+                startWeixinQrLogin();
+                startWeixinActiveStatusPoll();
+            });
+    })
+    .catch(() => {
+        const p = document.getElementById('weixin-qr-panel');
+        if (p) p.innerHTML = `<p class="text-sm text-red-500">${t('weixin_scan_fail')}</p>`;
+    });
+}
 
 function stopWeixinStatusPoll() {
     if (_weixinStatusPollTimer) {
