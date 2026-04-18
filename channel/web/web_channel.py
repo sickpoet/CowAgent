@@ -1554,7 +1554,7 @@ class SchedulerHandler:
         try:
             from agent.tools.scheduler.task_store import TaskStore
             workspace_root = _get_workspace_root()
-            store_path = os.path.join(workspace_root, "scheduler", "tasks.json")
+            store_path = os.path.join(workspace_root, "scheduler", "tasks.db")
             store = TaskStore(store_path)
             tasks = store.list_tasks()
             return json.dumps({"status": "success", "tasks": tasks}, ensure_ascii=False)

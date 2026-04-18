@@ -33,7 +33,7 @@ def init_scheduler(agent_bridge) -> bool:
         
         # Get workspace from config
         workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
-        store_path = os.path.join(workspace_root, "scheduler", "tasks.json")
+        store_path = os.path.join(workspace_root, "scheduler", "tasks.db")
         
         # Create task store
         _task_store = TaskStore(store_path)
