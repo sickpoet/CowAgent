@@ -13,6 +13,7 @@ ARG PLAYWRIGHT_DOWNLOAD_HOST=https://registry.npmmirror.com/-/binary/playwright
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/ms-playwright
 ENV PLAYWRIGHT_DOWNLOAD_HOST=${PLAYWRIGHT_DOWNLOAD_HOST}
 ENV BUILD_PREFIX=/app
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Optionally switch apt and pip to China mirrors
 RUN if [ "$USE_CN_MIRROR" = "true" ]; then \
@@ -23,29 +24,47 @@ RUN if [ "$USE_CN_MIRROR" = "true" ]; then \
 ADD . ${BUILD_PREFIX}
 
 # All heavy installs + user creation in ONE layer to avoid chown duplication
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends bash ffmpeg espeak passwd ca-certificates \
-    && (apt-get install -y --no-install-recommends libavcodec-extra \
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends bash ffmpeg espeak passwd ca-certificates; \
+    (apt-get install -y --no-install-recommends libavcodec-extra \
         || apt-get install -y --no-install-recommends libavcodec-extra58 \
-        || true) \
-    && cd ${BUILD_PREFIX} \
-    && cp config-template.json config.json \
-    && /usr/local/bin/python -m pip install --no-cache --upgrade pip setuptools wheel \
-    && python -m pip install --no-cache -r requirements.txt \
-    && python -m pip install --no-cache -r requirements-optional.txt \
-    && python -m pip install --no-cache -e . \
-    && if [ "$INSTALL_BROWSER" = "true" ]; then \
-        (apt-get install -y --no-install-recommends fonts-wqy-zenhei || true) \
-        && python -m pip install --no-cache "playwright==1.52.0" \
-        && python -m playwright install-deps chromium \
-        && mkdir -p /app/ms-playwright \
-        && python -m playwright install chromium; \
-    fi \
-    && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /home/agent/cow \
-    && groupadd -r agent \
-    && useradd -r -g agent -s /bin/bash -d /home/agent agent \
-    && chown -R agent:agent /home/agent ${BUILD_PREFIX} /usr/local/lib
+        || true); \
+    rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    cd ${BUILD_PREFIX}; \
+    cp config-template.json config.json; \
+    /usr/local/bin/python -m pip install --no-cache --upgrade pip setuptools wheel
+
+RUN set -eux; \
+    cd ${BUILD_PREFIX}; \
+    python -m pip install --no-cache -r requirements.txt
+
+RUN set -eux; \
+    cd ${BUILD_PREFIX}; \
+    python -m pip install --no-cache -r requirements-optional.txt
+
+RUN set -eux; \
+    cd ${BUILD_PREFIX}; \
+    python -m pip install --no-cache -e .
+
+RUN set -eux; \
+    if [ "$INSTALL_BROWSER" = "true" ]; then \
+        apt-get update; \
+        (apt-get install -y --no-install-recommends fonts-wqy-zenhei || true); \
+        python -m pip install --no-cache "playwright==1.52.0"; \
+        python -m playwright install-deps chromium; \
+        mkdir -p /app/ms-playwright; \
+        python -m playwright install chromium; \
+        rm -rf /var/lib/apt/lists/*; \
+    fi
+
+RUN set -eux; \
+    mkdir -p /home/agent/cow; \
+    groupadd -r agent; \
+    useradd -r -g agent -s /bin/bash -d /home/agent agent; \
+    chown -R agent:agent /home/agent ${BUILD_PREFIX} /usr/local/lib
 
 WORKDIR ${BUILD_PREFIX}
 
