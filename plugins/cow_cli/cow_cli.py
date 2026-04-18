@@ -32,6 +32,7 @@ KNOWN_COMMANDS = {
     "start", "stop", "restart",
     "skill", "context", "config",
     "knowledge", "memory",
+    "scheduler",
     "install-browser",
 }
 
@@ -150,6 +151,7 @@ class CowCliPlugin(Plugin):
             "  /logs [N]      查看最近N条日志 (默认20)",
             "  /context       查看当前对话上下文信息",
             "  /context clear 清除当前对话上下文",
+            "  /scheduler     定时任务管理 (create/list/get/delete/enable/disable)",
             "  /skill list    查看已安装的技能",
             "  /skill list --remote  浏览技能广场",
             "  /skill search <关键词>  搜索技能",
@@ -416,6 +418,86 @@ class CowCliPlugin(Plugin):
         if "bot_type" in updates and updates["bot_type"] != old_bot_type:
             result += f"\n  bot_type: {old_bot_type} → {updates['bot_type']}"
         return result
+
+    def _cmd_scheduler(self, args: str, e_context, session_id: str = "", **_) -> str:
+        parts = args.strip().split(None, 1)
+        sub = parts[0].lower() if parts else ""
+        sub_args = parts[1].strip() if len(parts) > 1 else ""
+
+        if sub in ("", "help"):
+            return (
+                "用法: /scheduler <子命令>\n\n"
+                "子命令:\n"
+                "  list\n"
+                "  create <秒数|+10s|ISO时间> <提醒内容>\n"
+                "  get <task_id>\n"
+                "  delete <task_id>\n"
+                "  enable <task_id>\n"
+                "  disable <task_id>\n\n"
+                "示例:\n"
+                "  /scheduler create 60 1分钟后提醒我检查数据库\n"
+                "  /scheduler list"
+            )
+
+        try:
+            from bridge.bridge import Bridge
+            bridge = Bridge()
+            agent_bridge = getattr(bridge, "_agent_bridge", None)
+            if not agent_bridge:
+                return "⚠️ AgentBridge 未初始化"
+
+            if not getattr(agent_bridge, "scheduler_initialized", False):
+                from agent.tools.scheduler.integration import init_scheduler
+                ok = init_scheduler(agent_bridge)
+                agent_bridge.scheduler_initialized = bool(ok)
+
+            from agent.tools.scheduler.scheduler_tool import SchedulerTool
+            from agent.tools.scheduler.integration import attach_scheduler_to_tool
+            tool = SchedulerTool()
+            if e_context is not None:
+                attach_scheduler_to_tool(tool, e_context["context"])
+
+            if sub == "list":
+                res = tool.execute({"action": "list"})
+                return res.result if hasattr(res, "result") else str(res)
+
+            if sub == "create":
+                p = sub_args.split(None, 1)
+                if len(p) < 2:
+                    return "用法: /scheduler create <秒数|+10s|ISO时间> <提醒内容>"
+                delay_raw = p[0].strip()
+                message = p[1].strip()
+                if not message:
+                    return "错误: 提醒内容不能为空"
+
+                if delay_raw.isdigit():
+                    schedule_value = f"+{delay_raw}s"
+                else:
+                    schedule_value = delay_raw
+
+                import time as _time
+                name = f"reminder_{int(_time.time())}"
+                res = tool.execute({
+                    "action": "create",
+                    "name": name,
+                    "message": message,
+                    "schedule_type": "once",
+                    "schedule_value": schedule_value,
+                })
+                return res.result if hasattr(res, "result") else str(res)
+
+            if sub in ("get", "delete", "enable", "disable"):
+                if not sub_args:
+                    return f"用法: /scheduler {sub} <task_id>"
+                res = tool.execute({
+                    "action": sub,
+                    "task_id": sub_args.strip(),
+                })
+                return res.result if hasattr(res, "result") else str(res)
+
+            return "未知子命令。输入 /scheduler help 查看用法。"
+        except Exception as e:
+            return f"执行失败: {e}"
 
     @staticmethod
     def _resolve_bot_type_for_model(model_name: str) -> str:
