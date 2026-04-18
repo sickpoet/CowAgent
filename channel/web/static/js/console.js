@@ -3558,20 +3558,32 @@ function _initTasksToolbar() {
         btnSelected.addEventListener('click', () => {
             const ids = Array.from(tasksSelectedIds);
             if (!ids.length) return;
-            showConfirmDialog(
-                t('tasks_delete_title'),
-                t('tasks_confirm_delete_selected'),
-                () => {
+            showConfirmDialog({
+                title: t('tasks_delete_title'),
+                message: t('tasks_confirm_delete_selected'),
+                okText: t('confirm_yes'),
+                cancelText: t('confirm_cancel'),
+                onConfirm: () => {
                     fetch('/api/scheduler', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ action: 'delete_many', ids })
                     })
                     .then(r => r.json())
-                    .then(() => loadTasksView())
-                    .catch(() => {});
-                }
-            );
+                    .then(data => {
+                        if (data.status !== 'success') throw new Error(data.message || 'Delete failed');
+                        loadTasksView();
+                    })
+                    .catch(err => {
+                        showConfirmDialog({
+                            title: currentLang === 'zh' ? '删除失败' : 'Delete failed',
+                            message: err.message || 'Delete failed',
+                            okText: 'OK',
+                            cancelText: '',
+                        });
+                    });
+                },
+            });
         });
     }
 
@@ -3579,20 +3591,32 @@ function _initTasksToolbar() {
     if (btnAll && !btnAll.dataset.bound) {
         btnAll.dataset.bound = '1';
         btnAll.addEventListener('click', () => {
-            showConfirmDialog(
-                t('tasks_delete_title'),
-                t('tasks_confirm_delete_all'),
-                () => {
+            showConfirmDialog({
+                title: t('tasks_delete_title'),
+                message: t('tasks_confirm_delete_all'),
+                okText: t('confirm_yes'),
+                cancelText: t('confirm_cancel'),
+                onConfirm: () => {
                     fetch('/api/scheduler', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ action: 'delete_all' })
                     })
                     .then(r => r.json())
-                    .then(() => loadTasksView())
-                    .catch(() => {});
-                }
-            );
+                    .then(data => {
+                        if (data.status !== 'success') throw new Error(data.message || 'Delete failed');
+                        loadTasksView();
+                    })
+                    .catch(err => {
+                        showConfirmDialog({
+                            title: currentLang === 'zh' ? '删除失败' : 'Delete failed',
+                            message: err.message || 'Delete failed',
+                            okText: 'OK',
+                            cancelText: '',
+                        });
+                    });
+                },
+            });
         });
     }
 
@@ -3706,20 +3730,32 @@ function _renderTasksList() {
         btn.addEventListener('click', () => {
             const id = String(btn.dataset.taskId || '');
             if (!id) return;
-            showConfirmDialog(
-                t('tasks_delete_title'),
-                currentLang === 'zh' ? '确认删除该定时任务？' : 'Delete this task?',
-                () => {
+            showConfirmDialog({
+                title: t('tasks_delete_title'),
+                message: currentLang === 'zh' ? '确认删除该定时任务？' : 'Delete this task?',
+                okText: t('confirm_yes'),
+                cancelText: t('confirm_cancel'),
+                onConfirm: () => {
                     fetch('/api/scheduler', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ action: 'delete', id })
                     })
                     .then(r => r.json())
-                    .then(() => loadTasksView())
-                    .catch(() => {});
-                }
-            );
+                    .then(data => {
+                        if (data.status !== 'success') throw new Error(data.message || 'Delete failed');
+                        loadTasksView();
+                    })
+                    .catch(err => {
+                        showConfirmDialog({
+                            title: currentLang === 'zh' ? '删除失败' : 'Delete failed',
+                            message: err.message || 'Delete failed',
+                            okText: 'OK',
+                            cancelText: '',
+                        });
+                    });
+                },
+            });
         });
     });
 }
