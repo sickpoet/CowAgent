@@ -4,13 +4,42 @@ Background scheduler service for executing scheduled tasks
 
 import time
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 from croniter import croniter
 from common.log import logger
 
+try:
+    from zoneinfo import ZoneInfo
 
-class SchedulerService:
+    _BEIJING_TZ = ZoneInfo("Asia/Shanghai")
+except Exception:
+    _BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+def _now_beijing() -> datetime:
+    return datetime.now(tz=_BEIJING_TZ)
+
+
+def _parse_iso_datetime(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    s = value.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_BEIJING_TZ)
+    return dt
+
+
+def _as_beijing(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=_BEIJING_TZ)
+    return dt.astimezone(_BEIJING_TZ)
+
+
+
     """
     Background service that executes scheduled tasks
     """
@@ -66,7 +95,7 @@ class SchedulerService:
     
     def _check_and_execute_tasks(self):
         """Check for due tasks and execute them"""
-        now = datetime.now()
+        now = _now_beijing()
         tasks = self.task_store.list_tasks(enabled_only=True)
         
         for task in tasks:
@@ -113,7 +142,11 @@ class SchedulerService:
             return False
         
         try:
-            next_run = datetime.fromisoformat(next_run_str)
+            next_run = _parse_iso_datetime(next_run_str)
+            if not next_run:
+                return False
+            next_run = _as_beijing(next_run)
+            now = _as_beijing(now)
             
             # Check if task is overdue (e.g., service restart)
             if next_run < now:
@@ -165,7 +198,8 @@ class SchedulerService:
             
             try:
                 cron = croniter(expression, from_time)
-                return cron.get_next(datetime)
+                candidate = cron.get_next(datetime)
+                return _as_beijing(candidate)
             except Exception as e:
                 logger.error(f"[Scheduler] Invalid cron expression '{expression}': {e}")
                 return None
@@ -184,7 +218,11 @@ class SchedulerService:
                 return None
             
             try:
-                run_at = datetime.fromisoformat(run_at_str)
+                run_at = _parse_iso_datetime(run_at_str)
+                if not run_at:
+                    return None
+                run_at = _as_beijing(run_at)
+                from_time = _as_beijing(from_time)
                 # Only return if in the future
                 if run_at > from_time:
                     return run_at
@@ -209,5 +247,5 @@ class SchedulerService:
             # Update task with error
             self.task_store.update_task(task['id'], {
                 "last_error": str(e),
-                "last_error_at": datetime.now().isoformat()
+                "last_error_at": _now_beijing().isoformat()
             })

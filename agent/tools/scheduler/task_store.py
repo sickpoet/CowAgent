@@ -6,9 +6,20 @@ import json
 import os
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 from common.utils import expand_path
+
+try:
+    from zoneinfo import ZoneInfo
+
+    _BEIJING_TZ = ZoneInfo("Asia/Shanghai")
+except Exception:
+    _BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+def _now_beijing_iso() -> str:
+    return datetime.now(tz=_BEIJING_TZ).isoformat()
 
 
 def _get_database_url(explicit: Optional[str] = None) -> str:
@@ -96,7 +107,7 @@ class _SQLiteTaskStore:
                 if not isinstance(tasks, dict) or not tasks:
                     return
 
-                now = datetime.now().isoformat()
+                now = _now_beijing_iso()
                 rows = []
                 for task_id, task in tasks.items():
                     if not isinstance(task, dict):
@@ -159,7 +170,7 @@ class _SQLiteTaskStore:
             conn = self._connect()
             try:
                 conn.execute("DELETE FROM scheduler_tasks")
-                now = datetime.now().isoformat()
+                now = _now_beijing_iso()
                 rows = []
                 for task_id, task in (tasks or {}).items():
                     if not isinstance(task, dict):
@@ -210,7 +221,7 @@ class _SQLiteTaskStore:
                 if exists:
                     raise ValueError(f"Task with id '{task_id}' already exists")
 
-                now = datetime.now().isoformat()
+                now = _now_beijing_iso()
                 created_at = task.get("created_at") or now
                 updated_at = task.get("updated_at") or created_at
                 enabled = 1 if task.get("enabled", True) else 0
@@ -259,7 +270,7 @@ class _SQLiteTaskStore:
 
                 task.update(updates or {})
                 task["id"] = task_id
-                task["updated_at"] = datetime.now().isoformat()
+                task["updated_at"] = _now_beijing_iso()
                 if not task.get("created_at"):
                     task["created_at"] = row["created_at"]
 
@@ -443,7 +454,7 @@ class _PostgresTaskStore:
         if not rows:
             return
 
-        now_iso = datetime.now().isoformat()
+        now_iso = _now_beijing_iso()
         payloads = []
         for r in rows:
             tid = r["id"]
@@ -506,7 +517,7 @@ class _PostgresTaskStore:
 
     def save_tasks(self, tasks: Dict[str, dict]):
         import psycopg2.extras
-        now_iso = datetime.now().isoformat()
+        now_iso = _now_beijing_iso()
         rows = []
         for task_id, task in (tasks or {}).items():
             if not isinstance(task, dict):
@@ -544,7 +555,7 @@ class _PostgresTaskStore:
         if not task_id:
             raise ValueError("Task must have an 'id' field")
 
-        now_iso = datetime.now().isoformat()
+        now_iso = _now_beijing_iso()
         created_at = task.get("created_at") or now_iso
         updated_at = task.get("updated_at") or created_at
         enabled = bool(task.get("enabled", True))
@@ -587,7 +598,7 @@ class _PostgresTaskStore:
                     task = {}
                 task.update(updates or {})
                 task["id"] = task_id
-                task["updated_at"] = datetime.now().isoformat()
+                task["updated_at"] = _now_beijing_iso()
                 if not task.get("created_at"):
                     task["created_at"] = created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at)
 

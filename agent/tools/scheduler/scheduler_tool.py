@@ -3,7 +3,7 @@ Scheduler tool for creating and managing scheduled tasks
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 from croniter import croniter
 
@@ -12,8 +12,37 @@ from bridge.context import Context, ContextType
 from bridge.reply import Reply, ReplyType
 from common.log import logger
 
+try:
+    from zoneinfo import ZoneInfo
 
-class SchedulerTool(BaseTool):
+    _BEIJING_TZ = ZoneInfo("Asia/Shanghai")
+except Exception:
+    _BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+def _now_beijing() -> datetime:
+    return datetime.now(tz=_BEIJING_TZ)
+
+
+def _parse_iso_datetime(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    s = value.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_BEIJING_TZ)
+    return dt
+
+
+def _as_beijing(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=_BEIJING_TZ)
+    return dt.astimezone(_BEIJING_TZ)
+
+
+
     """
     Tool for managing scheduled tasks (reminders, notifications, etc.)
     """
@@ -187,8 +216,8 @@ class SchedulerTool(BaseTool):
             "id": task_id,
             "name": name,
             "enabled": True,
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat(),
+            "created_at": _now_beijing().isoformat(),
+            "updated_at": _now_beijing().isoformat(),
             "schedule": schedule,
             "action": action
         }
@@ -233,7 +262,8 @@ class SchedulerTool(BaseTool):
             status = "✅" if task.get("enabled", True) else "❌"
             schedule_desc = self._format_schedule_description(task.get("schedule", {}))
             next_run = task.get("next_run_at")
-            next_run_str = datetime.fromisoformat(next_run).strftime('%m-%d %H:%M') if next_run else "未知"
+            dt = _parse_iso_datetime(next_run) if next_run else None
+            next_run_str = _as_beijing(dt).strftime('%m-%d %H:%M') if dt else "未知"
             
             lines.append(
                 f"{status} [{task['id']}] {task['name']}\n"
@@ -256,9 +286,13 @@ class SchedulerTool(BaseTool):
         schedule_desc = self._format_schedule_description(task.get("schedule", {}))
         action = task.get("action", {})
         next_run = task.get("next_run_at")
-        next_run_str = datetime.fromisoformat(next_run).strftime('%Y-%m-%d %H:%M:%S') if next_run else "未知"
+        next_run_dt = _parse_iso_datetime(next_run) if next_run else None
+        next_run_str = _as_beijing(next_run_dt).strftime('%Y-%m-%d %H:%M:%S') if next_run_dt else "未知"
         last_run = task.get("last_run_at")
-        last_run_str = datetime.fromisoformat(last_run).strftime('%Y-%m-%d %H:%M:%S') if last_run else "从未执行"
+        last_run_dt = _parse_iso_datetime(last_run) if last_run else None
+        last_run_str = _as_beijing(last_run_dt).strftime('%Y-%m-%d %H:%M:%S') if last_run_dt else "从未执行"
+        created_dt = _parse_iso_datetime(task.get("created_at")) if task.get("created_at") else None
+        created_str = _as_beijing(created_dt).strftime('%Y-%m-%d %H:%M:%S') if created_dt else "未知"
         
         return (
             f"📋 任务详情\n\n"
@@ -270,7 +304,7 @@ class SchedulerTool(BaseTool):
             f"消息: {action.get('content')}\n"
             f"下次执行: {next_run_str}\n"
             f"上次执行: {last_run_str}\n"
-            f"创建时间: {datetime.fromisoformat(task['created_at']).strftime('%Y-%m-%d %H:%M:%S')}"
+            f"创建时间: {created_str}"
         )
     
     def _delete_task(self, **kwargs) -> str:
@@ -337,9 +371,7 @@ class SchedulerTool(BaseTool):
                     if match:
                         amount = int(match.group(1))
                         unit = match.group(2)
-                        
-                        from datetime import timedelta
-                        now = datetime.now()
+                        now = _now_beijing()
                         
                         if unit == 's':  # seconds
                             target_time = now + timedelta(seconds=amount)
@@ -358,8 +390,10 @@ class SchedulerTool(BaseTool):
                         return None
                 else:
                     # Absolute time in ISO format
-                    datetime.fromisoformat(schedule_value)
-                    return {"type": "once", "run_at": schedule_value}
+                    dt = _parse_iso_datetime(schedule_value)
+                    if not dt:
+                        return None
+                    return {"type": "once", "run_at": _as_beijing(dt).isoformat()}
             
         except Exception as e:
             logger.error(f"[SchedulerTool] Invalid schedule: {e}")
@@ -371,21 +405,21 @@ class SchedulerTool(BaseTool):
         """Calculate next run time for a task"""
         schedule = task.get("schedule", {})
         schedule_type = schedule.get("type")
-        now = datetime.now()
+        now = _now_beijing()
         
         if schedule_type == "cron":
             expression = schedule.get("expression")
             cron = croniter(expression, now)
-            return cron.get_next(datetime)
+            return _as_beijing(cron.get_next(datetime))
         
         elif schedule_type == "interval":
             seconds = schedule.get("seconds", 0)
-            from datetime import timedelta
             return now + timedelta(seconds=seconds)
         
         elif schedule_type == "once":
             run_at_str = schedule.get("run_at")
-            return datetime.fromisoformat(run_at_str)
+            dt = _parse_iso_datetime(run_at_str)
+            return _as_beijing(dt) if dt else None
         
         return None
     
@@ -422,7 +456,10 @@ class SchedulerTool(BaseTool):
         elif schedule_type == "once":
             run_at = schedule.get("run_at", "")
             try:
-                dt = datetime.fromisoformat(run_at)
+                dt = _parse_iso_datetime(run_at)
+                if not dt:
+                    return "一次性"
+                dt = _as_beijing(dt)
                 return f"一次性 ({dt.strftime('%Y-%m-%d %H:%M')})"
             except Exception:
                 return "一次性"
