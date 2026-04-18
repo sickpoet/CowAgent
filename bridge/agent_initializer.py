@@ -13,6 +13,13 @@ from agent.tools import ToolManager
 from common.log import logger
 from common.utils import expand_path
 
+try:
+    from zoneinfo import ZoneInfo
+
+    _BEIJING_TZ = ZoneInfo("Asia/Shanghai")
+except Exception:
+    _BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
+
 
 class AgentInitializer:
     """
@@ -551,7 +558,7 @@ class AgentInitializer:
             import random
             while True:
                 try:
-                    now = datetime.datetime.now()
+                    now = datetime.datetime.now(tz=_BEIJING_TZ)
                     jitter_min = random.randint(50, 55)
                     jitter_sec = random.randint(0, 59)
                     target = now.replace(hour=23, minute=jitter_min, second=jitter_sec, microsecond=0)
@@ -584,6 +591,7 @@ class AgentInitializer:
         flushed = 0
         flush_threads = []
         dream_candidate = None
+        dirty_managers = []
         for label, agent in agents:
             try:
                 if not agent.memory_manager:
@@ -595,6 +603,11 @@ class AgentInitializer:
                 result = agent.memory_manager.flush_manager.create_daily_summary(messages)
                 if result:
                     flushed += 1
+                    try:
+                        agent.memory_manager.mark_dirty()
+                    except Exception:
+                        pass
+                    dirty_managers.append(agent.memory_manager)
                     t = agent.memory_manager.flush_manager._last_flush_thread
                     if t:
                         flush_threads.append(t)
@@ -611,10 +624,32 @@ class AgentInitializer:
             t.join(timeout=60)
 
         # Phase 2: Deep Dream — distill daily memories → MEMORY.md + dream diary
+        dreamed = False
         if dream_candidate:
             try:
                 result = dream_candidate.deep_dream()
                 if result:
+                    dreamed = True
                     logger.info("[DeepDream] Memory distillation completed successfully")
             except Exception as e:
                 logger.warning(f"[DeepDream] Failed: {e}")
+
+        if dreamed:
+            for _, agent in agents:
+                try:
+                    if agent.memory_manager:
+                        agent.memory_manager.mark_dirty()
+                        dirty_managers.append(agent.memory_manager)
+                except Exception:
+                    pass
+
+        if dirty_managers:
+            seen = set()
+            for mgr in dirty_managers:
+                if id(mgr) in seen:
+                    continue
+                seen.add(id(mgr))
+                try:
+                    self._sync_memory(mgr)
+                except Exception:
+                    pass
