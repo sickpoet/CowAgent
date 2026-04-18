@@ -2,6 +2,7 @@
 Scheduler tool for creating and managing scheduled tasks
 """
 
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
@@ -11,6 +12,8 @@ from agent.tools.base_tool import BaseTool, ToolResult
 from bridge.context import Context, ContextType
 from bridge.reply import Reply, ReplyType
 from common.log import logger
+from common.utils import expand_path
+from config import conf
 
 try:
     from zoneinfo import ZoneInfo
@@ -42,7 +45,7 @@ def _as_beijing(dt: datetime) -> datetime:
     return dt.astimezone(_BEIJING_TZ)
 
 
-
+class SchedulerTool(BaseTool):
     """
     Tool for managing scheduled tasks (reminders, notifications, etc.)
     """
@@ -105,6 +108,24 @@ def _as_beijing(dt: datetime) -> datetime:
         # Will be set by agent bridge
         self.task_store = None
         self.current_context = None
+
+    def _ensure_task_store(self) -> bool:
+        if self.task_store:
+            return True
+        try:
+            from agent.tools.scheduler.task_store import TaskStore
+
+            workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+            store_path = os.path.join(workspace_root, "scheduler", "tasks.db")
+            self.task_store = TaskStore(store_path)
+            if self.config is None:
+                self.config = {}
+            if "channel_type" not in self.config:
+                self.config["channel_type"] = conf().get("channel_type", "unknown")
+            return True
+        except Exception as e:
+            logger.error(f"[SchedulerTool] Failed to init task_store: {e}")
+            return False
     
     def execute(self, params: dict) -> ToolResult:
         """
@@ -122,7 +143,7 @@ def _as_beijing(dt: datetime) -> datetime:
         action = params.get("action")
         kwargs = params
         
-        if not self.task_store:
+        if not self._ensure_task_store():
             return ToolResult.fail("错误: 定时任务系统未初始化")
         
         try:
