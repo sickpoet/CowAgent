@@ -40,5 +40,9 @@ services:
       AGENT_MAX_CONTEXT_TOKENS: 50000
       AGENT_MAX_CONTEXT_TURNS: 20
       AGENT_MAX_STEPS: 20
+      KNOWLEDGE_GIT_SYNC_ENABLED: 'False'
+      WORKSPACE_GIT_SYNC_ENABLED: 'False'
     volumes:
       - ./cow:/home/agent/cow
+      - ./cow-dot:/home/agent/.cow
+      - ./weixin-credentials.json:/home/agent/.weixin_cow_credentials.json
