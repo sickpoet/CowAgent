@@ -39,11 +39,11 @@ def _as_beijing(dt: datetime) -> datetime:
     return dt.astimezone(_BEIJING_TZ)
 
 
-
+class SchedulerService:
     """
     Background service that executes scheduled tasks
     """
-    
+
     def __init__(self, task_store, execute_callback: Callable):
         """
         Initialize scheduler service

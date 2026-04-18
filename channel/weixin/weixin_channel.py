@@ -90,6 +90,7 @@ def _load_credentials_from_db(db_url: str, cred_id: str) -> dict:
             )
             row = cur.fetchone()
             if not row:
+                logger.debug(f"[Weixin] Credentials DB miss: id={cred_id}")
                 return {}
             token, base_url, bot_id, user_id = row
             data = {
@@ -98,6 +99,10 @@ def _load_credentials_from_db(db_url: str, cred_id: str) -> dict:
                 "bot_id": bot_id or "",
                 "user_id": user_id or "",
             }
+            if data.get("token"):
+                logger.debug(
+                    f"[Weixin] Credentials DB hit: id={cred_id} bot_id={_mask_id(data.get('bot_id',''))} user_id={_mask_id(data.get('user_id',''))}"
+                )
             return data if data.get("token") else {}
         finally:
             conn.close()
@@ -127,6 +132,7 @@ def _load_latest_credentials_from_db(db_url: str) -> dict:
             )
             row = cur.fetchone()
             if not row:
+                logger.debug("[Weixin] Credentials DB miss: latest")
                 return {}
             token, base_url, bot_id, user_id = row
             data = {
@@ -135,6 +141,10 @@ def _load_latest_credentials_from_db(db_url: str) -> dict:
                 "bot_id": bot_id or "",
                 "user_id": user_id or "",
             }
+            if data.get("token"):
+                logger.debug(
+                    f"[Weixin] Credentials DB hit: latest bot_id={_mask_id(data.get('bot_id',''))} user_id={_mask_id(data.get('user_id',''))}"
+                )
             return data if data.get("token") else {}
         finally:
             conn.close()
@@ -218,7 +228,7 @@ def _mask_id(value: str) -> str:
     return value[:4] + "*" * (len(value) - 8) + value[-4:]
 
 
-def _load_credentials(cred_path: str) -> dict:
+def _load_credentials(cred_path: str) -> tuple[dict, str]:
     """Load saved credentials from JSON file."""
     db_url = _get_database_url()
     if db_url:
@@ -226,20 +236,20 @@ def _load_credentials(cred_path: str) -> dict:
         if hint:
             data = _load_credentials_from_db(db_url, hint)
             if data:
-                return data
+                return data, "db:hint"
         data = _load_credentials_from_db(db_url, "default")
         if data:
-            return data
+            return data, "db:default"
         data = _load_latest_credentials_from_db(db_url)
         if data:
-            return data
+            return data, "db:latest"
     try:
         if os.path.exists(cred_path):
-            with open(cred_path, "r") as f:
-                return json.load(f)
+            with open(cred_path, "r", encoding="utf-8") as f:
+                return json.load(f), "file"
     except Exception as e:
         logger.warning(f"[Weixin] Failed to load credentials: {e}")
-    return {}
+    return {}, "none"
 
 
 def _save_credentials(cred_path: str, data: dict):
@@ -304,6 +314,9 @@ class WeixinChannel(ChatChannel):
         base_url = conf().get("weixin_base_url", DEFAULT_BASE_URL)
         cdn_base_url = conf().get("weixin_cdn_base_url", CDN_BASE_URL)
         token = conf().get("weixin_token", "")
+        db_url = _get_database_url()
+        db_enabled = bool(db_url)
+        hint_id = _get_credentials_id_hint()
 
         configured_path = conf().get("weixin_credentials_path", "").strip()
         default_path = ""
@@ -317,13 +330,13 @@ class WeixinChannel(ChatChannel):
             legacy_path = os.path.expanduser("~/.weixin_cow_credentials.json")
             self._credentials_path = legacy_path if os.path.exists(legacy_path) and not os.path.exists(default_path) else default_path
 
-        creds = _load_credentials(self._credentials_path)
+        creds, creds_source = _load_credentials(self._credentials_path)
         if creds.get("token"):
             token = creds.get("token", "") or token
             if creds.get("base_url"):
                 base_url = creds["base_url"]
             if not token and not configured_path and legacy_path and default_path and self._credentials_path == default_path and os.path.exists(legacy_path):
-                legacy_creds = _load_credentials(legacy_path)
+                legacy_creds, _ = _load_credentials(legacy_path)
                 legacy_token = legacy_creds.get("token", "")
                 if legacy_token:
                     token = legacy_token
@@ -339,7 +352,13 @@ class WeixinChannel(ChatChannel):
         self.api = WeixinApi(base_url=base_url, token=token, cdn_base_url=cdn_base_url)
         self.login_status = self.LOGIN_STATUS_OK
 
+        db_status = "disabled"
+        if db_enabled:
+            db_status = "miss" if creds_source == "file" else "hit" if creds_source.startswith("db:") else "unknown"
+        hint_display = _mask_id(hint_id) if hint_id else ""
+        db_display = f"{db_status}" + (f"({hint_display})" if hint_display else "")
         logger.info(f"[Weixin] 微信通道已启动，凭证保存在 {self._credentials_path}，"
+                     f"来源={creds_source}，db={db_display}，"
                      f"如需重新扫码登录请删除该文件后重启")
         self.report_startup_success()
 

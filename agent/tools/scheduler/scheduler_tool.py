@@ -250,6 +250,8 @@ class SchedulerTool(BaseTool):
         
         # Save task
         self.task_store.add_task(task_data)
+        backend = getattr(self.task_store, "backend", "unknown")
+        logger.info(f"[SchedulerTool] create: persisted task id={task_id} name='{name}' backend={backend}")
         
         # Format response
         schedule_desc = self._format_schedule_description(schedule)
@@ -273,6 +275,8 @@ class SchedulerTool(BaseTool):
     def _list_tasks(self, **kwargs) -> str:
         """List all tasks"""
         tasks = self.task_store.list_tasks()
+        backend = getattr(self.task_store, "backend", "unknown")
+        logger.info(f"[SchedulerTool] list: backend={backend} count={len(tasks or [])}")
         
         if not tasks:
             return "📋 暂无定时任务"
@@ -300,6 +304,8 @@ class SchedulerTool(BaseTool):
             return "错误: 缺少任务ID (task_id)"
         
         task = self.task_store.get_task(task_id)
+        backend = getattr(self.task_store, "backend", "unknown")
+        logger.info(f"[SchedulerTool] get: backend={backend} id={task_id} found={bool(task)}")
         if not task:
             return f"错误: 任务 '{task_id}' 不存在"
         
@@ -339,6 +345,8 @@ class SchedulerTool(BaseTool):
             return f"错误: 任务 '{task_id}' 不存在"
         
         self.task_store.delete_task(task_id)
+        backend = getattr(self.task_store, "backend", "unknown")
+        logger.info(f"[SchedulerTool] delete: backend={backend} id={task_id} name='{task.get('name','')}'")
         return f"✅ 任务 '{task['name']}' ({task_id}) 已删除"
     
     def _enable_task(self, **kwargs) -> str:
@@ -352,6 +360,8 @@ class SchedulerTool(BaseTool):
             return f"错误: 任务 '{task_id}' 不存在"
         
         self.task_store.enable_task(task_id, True)
+        backend = getattr(self.task_store, "backend", "unknown")
+        logger.info(f"[SchedulerTool] enable: backend={backend} id={task_id} name='{task.get('name','')}'")
         return f"✅ 任务 '{task['name']}' ({task_id}) 已启用"
     
     def _disable_task(self, **kwargs) -> str:
@@ -365,6 +375,8 @@ class SchedulerTool(BaseTool):
             return f"错误: 任务 '{task_id}' 不存在"
         
         self.task_store.enable_task(task_id, False)
+        backend = getattr(self.task_store, "backend", "unknown")
+        logger.info(f"[SchedulerTool] disable: backend={backend} id={task_id} name='{task.get('name','')}'")
         return f"✅ 任务 '{task['name']}' ({task_id}) 已禁用"
     
     def _parse_schedule(self, schedule_type: str, schedule_value: str) -> Optional[dict]:

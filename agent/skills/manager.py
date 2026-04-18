@@ -77,6 +77,7 @@ class SkillManager:
         try:
             with open(self._skills_config_path, "w", encoding="utf-8") as f:
                 json.dump(self.skills_config, f, indent=4, ensure_ascii=False)
+            logger.debug(f"[SkillManager] Saved {SKILLS_CONFIG_FILE}: {len(self.skills_config)} skills -> {self._skills_config_path}")
         except Exception as e:
             logger.error(f"[SkillManager] Failed to save {SKILLS_CONFIG_FILE}: {e}")
 

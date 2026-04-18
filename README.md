@@ -238,6 +238,64 @@ cow install-browser
 
 注：全部配置项说明可在 [`config.py`](https://github.com/zhayujie/CowAgent/blob/master/config.py) 文件中查看。
 
+## 持久化与审计（数据库/文件）
+
+为了便于排查“看起来成功但实际没写入”的问题，项目对以下数据提供了可审计的持久化方式：日志、文件、以及可选的数据库（PostgreSQL）。
+
+### 1）启用数据库（可选）
+
+当你配置了数据库连接串后，下列模块会优先读写数据库（并在必要时回退到文件）：
+
+- 方式一：环境变量 `DATABASE_URL`
+- 方式二：`config.json` 增加字段 `"database_url": "postgresql://..."`
+
+> 注意：请勿在日志或截图中泄漏 `DATABASE_URL`（含用户名/密码）。
+
+### 2）微信扫码凭证（Weixin）
+
+**写入点（扫码确认时）**：日志会打印本次保存结果（不包含 token，仅输出脱敏信息）：
+
+- 关键日志：`[Weixin] QR credentials saved (... db_saved=..., db_ids=..., bot_id=****, user_id=****, base_url=...)`
+
+**读取点（启动时）**：日志会打印本次启动凭证的来源和数据库命中情况：
+
+- 关键日志：`[Weixin] 微信通道已启动... 来源=<db:hint|db:default|db:latest|file|none>，db=<hit|miss|disabled>`
+
+**数据库核对（PostgreSQL）**：表名为 `weixin_credentials`，可用如下 SQL 查看最近写入（建议不要查询/展示 token 字段）：
+
+```sql
+SELECT id, bot_id, user_id, base_url, updated_at
+FROM weixin_credentials
+ORDER BY updated_at DESC
+LIMIT 20;
+```
+
+### 3）定时任务（Scheduler）
+
+定时任务默认持久化在工作空间的 SQLite 文件中：
+
+- 路径：`<agent_workspace>/scheduler/tasks.db`（`agent_workspace` 默认为 `~/cow`）
+
+当启用 `DATABASE_URL` 后，定时任务会使用 PostgreSQL 存储（表名 `scheduler_tasks`，字段 `data` 为 JSONB）。
+
+**数据库核对（PostgreSQL）**：
+
+```sql
+SELECT id, enabled, next_run_at, updated_at
+FROM scheduler_tasks
+ORDER BY updated_at DESC
+LIMIT 50;
+```
+
+### 4）技能（Skills）添加/启用/禁用/删除
+
+Skills 目前默认是**文件持久化**（不是数据库持久化）：
+
+- 目录：`<agent_workspace>/skills/`
+- 配置文件：`<agent_workspace>/skills/skills_config.json`
+
+你可以通过日志确认变更是否落盘（SkillService 会记录 open/close/add/delete 等操作），同时检查 `skills_config.json` 是否已更新。
+
 ## 三、运行
 
 ### 1.本地运行

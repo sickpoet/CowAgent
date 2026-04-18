@@ -6,9 +6,11 @@ import json
 import os
 import sqlite3
 import threading
+from urllib.parse import urlsplit, urlunsplit
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 from common.utils import expand_path
+from common.log import logger
 
 try:
     from zoneinfo import ZoneInfo
@@ -33,6 +35,24 @@ def _get_database_url(explicit: Optional[str] = None) -> str:
         return (conf().get("database_url") or "").strip()
     except Exception:
         return ""
+
+
+def _mask_db_url(db_url: str) -> str:
+    if not db_url:
+        return ""
+    try:
+        parts = urlsplit(db_url)
+        netloc = parts.netloc
+        if "@" in netloc:
+            userinfo, hostport = netloc.rsplit("@", 1)
+            if ":" in userinfo:
+                username = userinfo.split(":", 1)[0]
+                netloc = f"{username}:***@{hostport}"
+            else:
+                netloc = f"{userinfo}@{hostport}"
+        return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+    except Exception:
+        return "<redacted>"
 
 
 class _SQLiteTaskStore:
@@ -133,6 +153,7 @@ class _SQLiteTaskStore:
                     rows,
                 )
                 conn.commit()
+                logger.info(f"[TaskStore] Migrated {len(rows)} task(s) from legacy json '{json_path}' to sqlite '{self.store_path}'")
             finally:
                 conn.close()
     
@@ -436,23 +457,23 @@ class _PostgresTaskStore:
         finally:
             conn.close()
 
-    def migrate_from_sqlite(self, sqlite_path: str) -> None:
+    def migrate_from_sqlite(self, sqlite_path: str) -> int:
         if not sqlite_path or not os.path.exists(sqlite_path):
-            return
+            return 0
         if not self._is_empty():
-            return
+            return 0
 
         conn_sqlite = sqlite3.connect(sqlite_path)
         conn_sqlite.row_factory = sqlite3.Row
         try:
             rows = conn_sqlite.execute("SELECT id, enabled, next_run_at, created_at, updated_at, data FROM scheduler_tasks").fetchall()
         except Exception:
-            return
+            return 0
         finally:
             conn_sqlite.close()
 
         if not rows:
-            return
+            return 0
 
         now_iso = _now_beijing_iso()
         payloads = []
@@ -491,8 +512,10 @@ class _PostgresTaskStore:
                     page_size=200,
                 )
                 conn.commit()
+                logger.info(f"[TaskStore] Migrated {len(payloads)} task(s) from sqlite '{sqlite_path}' to postgres")
             finally:
                 conn.close()
+        return len(payloads)
 
     def load_tasks(self) -> Dict[str, dict]:
         with self.lock:
@@ -692,10 +715,18 @@ class TaskStore:
         db_url = _get_database_url(database_url)
         if db_url:
             impl = _PostgresTaskStore(db_url)
-            impl.migrate_from_sqlite(store_path if store_path.lower().endswith(".db") else "")
+            migrated = impl.migrate_from_sqlite(store_path if store_path.lower().endswith(".db") else "")
             self._impl = impl
+            self.backend = "postgres"
+            self.store_path = store_path
+            self.database_url = db_url
+            logger.info(f"[TaskStore] Initialized backend=postgres db='{_mask_db_url(db_url)}' migrated={migrated}")
         else:
             self._impl = _SQLiteTaskStore(store_path)
+            self.backend = "sqlite"
+            self.store_path = getattr(self._impl, "store_path", store_path)
+            self.database_url = ""
+            logger.info(f"[TaskStore] Initialized backend=sqlite store='{self.store_path}'")
 
         try:
             for task in self.list_tasks() or []:
@@ -714,22 +745,37 @@ class TaskStore:
         return self._impl.load_tasks()
 
     def save_tasks(self, tasks: Dict[str, dict]):
-        return self._impl.save_tasks(tasks)
+        self._impl.save_tasks(tasks)
+        logger.info(f"[TaskStore] save_tasks ok backend={self.backend} count={len(tasks or {})}")
 
     def add_task(self, task: dict) -> bool:
-        return self._impl.add_task(task)
+        ok = self._impl.add_task(task)
+        tid = (task or {}).get("id", "")
+        logger.info(f"[TaskStore] add_task ok backend={self.backend} id={tid}")
+        return ok
 
     def update_task(self, task_id: str, updates: dict) -> bool:
-        return self._impl.update_task(task_id, updates)
+        ok = self._impl.update_task(task_id, updates)
+        keys = list((updates or {}).keys())
+        logger.info(f"[TaskStore] update_task ok backend={self.backend} id={task_id} keys={keys}")
+        return ok
 
     def delete_task(self, task_id: str) -> bool:
-        return self._impl.delete_task(task_id)
+        ok = self._impl.delete_task(task_id)
+        logger.info(f"[TaskStore] delete_task ok backend={self.backend} id={task_id}")
+        return ok
 
     def get_task(self, task_id: str) -> Optional[dict]:
-        return self._impl.get_task(task_id)
+        task = self._impl.get_task(task_id)
+        logger.debug(f"[TaskStore] get_task backend={self.backend} id={task_id} found={bool(task)}")
+        return task
 
     def list_tasks(self, enabled_only: bool = False) -> List[dict]:
-        return self._impl.list_tasks(enabled_only=enabled_only)
+        tasks = self._impl.list_tasks(enabled_only=enabled_only)
+        logger.debug(f"[TaskStore] list_tasks backend={self.backend} enabled_only={enabled_only} count={len(tasks or [])}")
+        return tasks
 
     def enable_task(self, task_id: str, enabled: bool = True) -> bool:
-        return self._impl.enable_task(task_id, enabled=enabled)
+        ok = self._impl.enable_task(task_id, enabled=enabled)
+        logger.info(f"[TaskStore] enable_task ok backend={self.backend} id={task_id} enabled={enabled}")
+        return ok
