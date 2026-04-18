@@ -10,6 +10,8 @@ Handles memory persistence when conversation context is trimmed or overflows:
 """
 
 import threading
+import os
+import time
 from typing import Optional, Callable, Any, List, Dict
 from pathlib import Path
 from datetime import datetime
@@ -89,8 +91,80 @@ DREAM_USER_PROMPT = """## 当前长期记忆（MEMORY.md）
 {daily_content}"""
 
 
+def _get_database_url() -> str:
+    env_url = (os.environ.get("DATABASE_URL") or "").strip()
+    if env_url:
+        return env_url
+    try:
+        from config import conf
+        return (conf().get("database_url") or "").strip()
+    except Exception:
+        return ""
 
-class MemoryFlushManager:
+
+def _ensure_memory_markdown_table(conn) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memory_markdown_files (
+            path TEXT PRIMARY KEY,
+            content TEXT NOT NULL DEFAULT '',
+            updated_at BIGINT NOT NULL
+        )
+        """
+    )
+
+
+def _save_markdown_to_db(db_url: str, rel_path: str, content: str) -> None:
+    if not db_url or not rel_path:
+        return
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url)
+        try:
+            _ensure_memory_markdown_table(conn)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO memory_markdown_files(path, content, updated_at)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (path) DO UPDATE SET
+                    content = EXCLUDED.content,
+                    updated_at = EXCLUDED.updated_at
+                """,
+                (rel_path, content or "", int(time.time())),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"[MemoryFlush] Failed to save markdown to DB: {e}")
+
+
+def _load_all_markdown_from_db(db_url: str) -> List[dict]:
+    if not db_url:
+        return []
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url)
+        try:
+            _ensure_memory_markdown_table(conn)
+            conn.commit()
+            cur = conn.cursor()
+            cur.execute("SELECT path, content, updated_at FROM memory_markdown_files")
+            rows = cur.fetchall() or []
+            out = []
+            for p, c, ts in rows:
+                out.append({"path": p or "", "content": c or "", "updated_at": int(ts or 0)})
+            return out
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"[MemoryFlush] Failed to load markdown from DB: {e}")
+        return []
+
+
+
     """
     Manages memory flush operations.
     
@@ -117,6 +191,53 @@ class MemoryFlushManager:
         self._last_flushed_content_hash: str = ""  # Content hash at last flush, for daily dedup
         self._last_dream_input_hash: str = ""  # Hash of dream input, for dedup
         self._last_flush_thread: Optional[threading.Thread] = None
+
+    def restore_markdown_files_from_db(self) -> int:
+        db_url = _get_database_url()
+        if not db_url:
+            return 0
+        restored = 0
+        workspace_root = Path(self.workspace_dir).resolve()
+        for row in _load_all_markdown_from_db(db_url):
+            rel_path = (row.get("path") or "").strip()
+            content = row.get("content") or ""
+            if not rel_path:
+                continue
+            try:
+                target = (workspace_root / rel_path).resolve()
+                if target != workspace_root and not str(target).startswith(str(workspace_root) + os.sep):
+                    continue
+                if target.exists():
+                    try:
+                        if target.is_file() and target.stat().st_size == 0 and (content or "").strip():
+                            target.write_text(content, encoding="utf-8")
+                            restored += 1
+                        continue
+                    except Exception:
+                        continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+                restored += 1
+            except Exception:
+                continue
+        if restored:
+            logger.info(f"[MemoryFlush] Restored {restored} markdown file(s) from DB")
+        return restored
+
+    def _backup_markdown_file_to_db(self, file_path: Path) -> None:
+        db_url = _get_database_url()
+        if not db_url:
+            return
+        try:
+            full = Path(file_path).resolve()
+            workspace_root = Path(self.workspace_dir).resolve()
+            if full != workspace_root and not str(full).startswith(str(workspace_root) + os.sep):
+                return
+            rel_path = str(full.relative_to(workspace_root)).replace("\\", "/")
+            content = full.read_text(encoding="utf-8")
+            _save_markdown_to_db(db_url, rel_path, content)
+        except Exception:
+            return
     
     def get_today_memory_file(self, user_id: Optional[str] = None, ensure_exists: bool = False) -> Path:
         """Get today's memory file path: memory/YYYY-MM-DD.md"""
@@ -236,6 +357,7 @@ class MemoryFlushManager:
 
             with open(daily_file, "a", encoding="utf-8") as f:
                 f.write(f"\n{header}\n\n{daily_part}\n")
+            self._backup_markdown_file_to_db(daily_file)
 
             logger.info(f"[MemoryFlush] Wrote daily memory to {daily_file.name} (reason={reason}, chars={len(daily_part)})")
 
@@ -381,6 +503,7 @@ class MemoryFlushManager:
             main_file = self.get_main_memory_file(user_id)
             old_size = len(memory_content)
             main_file.write_text(new_memory + "\n", encoding="utf-8")
+            self._backup_markdown_file_to_db(main_file)
             logger.info(
                 f"[DeepDream] Updated MEMORY.md "
                 f"({old_size} → {len(new_memory)} chars)"
@@ -470,6 +593,7 @@ class MemoryFlushManager:
             f"# Dream Diary: {today}\n\n{content}\n",
             encoding="utf-8",
         )
+        self._backup_markdown_file_to_db(diary_file)
         logger.info(f"[DeepDream] Wrote dream diary to {diary_file}")
 
     # ---- Internal helpers ----

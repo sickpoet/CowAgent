@@ -110,6 +110,11 @@ class MemoryManager:
         """Initialize workspace directories"""
         memory_dir = self.config.get_memory_dir()
         memory_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            self.flush_manager.restore_markdown_files_from_db()
+        except Exception:
+            pass
         
         # Create default memory files
         workspace_dir = self.config.get_workspace()

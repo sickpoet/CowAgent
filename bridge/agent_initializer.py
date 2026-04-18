@@ -308,6 +308,12 @@ class AgentInitializer:
             # Create memory manager
             memory_config = MemoryConfig(workspace_root=workspace_root)
             memory_manager = MemoryManager(memory_config, embedding_provider=embedding_provider)
+
+            try:
+                if getattr(memory_manager, "flush_manager", None):
+                    memory_manager.flush_manager.restore_markdown_files_from_db()
+            except Exception:
+                pass
             
             # Sync memory
             self._sync_memory(memory_manager, session_id)
