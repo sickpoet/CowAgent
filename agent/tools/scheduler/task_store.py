@@ -11,40 +11,35 @@ from typing import Dict, List, Optional
 from common.utils import expand_path
 
 
-class TaskStore:
-    """
-    Manages persistent storage of scheduled tasks
-    """
-    
-    def __init__(self, store_path: str = None):
-        """
-        Initialize task store
-        
-        Args:
-            store_path: Path to tasks DB file. Defaults to ~/cow/scheduler/tasks.db
-        """
-        if store_path is None:
-            # Default to ~/cow/scheduler/tasks.db
-            home = expand_path("~")
-            store_path = os.path.join(home, "cow", "scheduler", "tasks.db")
+def _get_database_url(explicit: Optional[str] = None) -> str:
+    if explicit is not None:
+        return explicit.strip()
+    env_url = (os.environ.get("DATABASE_URL") or "").strip()
+    if env_url:
+        return env_url
+    try:
+        from config import conf
+        return (conf().get("database_url") or "").strip()
+    except Exception:
+        return ""
 
-        self.legacy_json_path: Optional[str] = None
+
+class _SQLiteTaskStore:
+    def __init__(self, store_path: str):
         if store_path.lower().endswith(".json"):
             self.legacy_json_path = store_path
             store_path = store_path[:-5] + ".db"
         else:
             candidate = os.path.join(os.path.dirname(store_path), "tasks.json")
-            if os.path.exists(candidate):
-                self.legacy_json_path = candidate
+            self.legacy_json_path = candidate if os.path.exists(candidate) else None
 
         self.store_path = store_path
         self.lock = threading.Lock()
         self._ensure_store_dir()
         self._init_db()
         self._maybe_migrate_from_json()
-    
+
     def _ensure_store_dir(self):
-        """Ensure the storage directory exists"""
         store_dir = os.path.dirname(self.store_path)
         os.makedirs(store_dir, exist_ok=True)
 
@@ -202,10 +197,10 @@ class TaskStore:
             True if successful
         """
         task_id = task.get("id")
-        
+
         if not task_id:
             raise ValueError("Task must have an 'id' field")
-        
+
         with self.lock:
             conn = self._connect()
             try:
@@ -385,3 +380,332 @@ class TaskStore:
             True if successful
         """
         return self.update_task(task_id, {"enabled": enabled})
+
+
+class _PostgresTaskStore:
+    def __init__(self, database_url: str):
+        self.database_url = database_url
+        self.lock = threading.Lock()
+        self._init_db()
+
+    def _connect(self):
+        import psycopg2
+        return psycopg2.connect(self.database_url)
+
+    def _init_db(self):
+        with self.lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS scheduler_tasks (
+                        id TEXT PRIMARY KEY,
+                        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                        next_run_at TIMESTAMPTZ NULL,
+                        created_at TIMESTAMPTZ NOT NULL,
+                        updated_at TIMESTAMPTZ NOT NULL,
+                        data JSONB NOT NULL
+                    )
+                    """
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_scheduler_tasks_enabled_next_run ON scheduler_tasks(enabled, next_run_at)"
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def _is_empty(self) -> bool:
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(1) FROM scheduler_tasks")
+            return int(cur.fetchone()[0]) == 0
+        finally:
+            conn.close()
+
+    def migrate_from_sqlite(self, sqlite_path: str) -> None:
+        if not sqlite_path or not os.path.exists(sqlite_path):
+            return
+        if not self._is_empty():
+            return
+
+        conn_sqlite = sqlite3.connect(sqlite_path)
+        conn_sqlite.row_factory = sqlite3.Row
+        try:
+            rows = conn_sqlite.execute("SELECT id, enabled, next_run_at, created_at, updated_at, data FROM scheduler_tasks").fetchall()
+        except Exception:
+            return
+        finally:
+            conn_sqlite.close()
+
+        if not rows:
+            return
+
+        now_iso = datetime.now().isoformat()
+        payloads = []
+        for r in rows:
+            tid = r["id"]
+            enabled = bool(r["enabled"])
+            next_run_at = r["next_run_at"]
+            created_at = r["created_at"] or now_iso
+            updated_at = r["updated_at"] or created_at
+            try:
+                data = json.loads(r["data"])
+            except Exception:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            payloads.append((tid, enabled, next_run_at, created_at, updated_at, json.dumps(data, ensure_ascii=False)))
+
+        import psycopg2.extras
+        with self.lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                psycopg2.extras.execute_batch(
+                    cur,
+                    """
+                    INSERT INTO scheduler_tasks(id, enabled, next_run_at, created_at, updated_at, data)
+                    VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                    ON CONFLICT (id) DO UPDATE
+                    SET enabled = EXCLUDED.enabled,
+                        next_run_at = EXCLUDED.next_run_at,
+                        created_at = EXCLUDED.created_at,
+                        updated_at = EXCLUDED.updated_at,
+                        data = EXCLUDED.data
+                    """,
+                    payloads,
+                    page_size=200,
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def load_tasks(self) -> Dict[str, dict]:
+        with self.lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT id, data FROM scheduler_tasks")
+                out: Dict[str, dict] = {}
+                for tid, data in cur.fetchall():
+                    if isinstance(data, dict):
+                        out[tid] = data
+                    else:
+                        try:
+                            decoded = json.loads(data)
+                            if isinstance(decoded, dict):
+                                out[tid] = decoded
+                        except Exception:
+                            continue
+                return out
+            finally:
+                conn.close()
+
+    def save_tasks(self, tasks: Dict[str, dict]):
+        import psycopg2.extras
+        now_iso = datetime.now().isoformat()
+        rows = []
+        for task_id, task in (tasks or {}).items():
+            if not isinstance(task, dict):
+                continue
+            tid = task.get("id") or task_id
+            if not tid:
+                continue
+            created_at = task.get("created_at") or now_iso
+            updated_at = task.get("updated_at") or now_iso
+            enabled = bool(task.get("enabled", True))
+            next_run_at = task.get("next_run_at")
+            rows.append((tid, enabled, next_run_at, created_at, updated_at, json.dumps(task, ensure_ascii=False)))
+
+        with self.lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute("TRUNCATE TABLE scheduler_tasks")
+                if rows:
+                    psycopg2.extras.execute_batch(
+                        cur,
+                        """
+                        INSERT INTO scheduler_tasks(id, enabled, next_run_at, created_at, updated_at, data)
+                        VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                        """,
+                        rows,
+                        page_size=200,
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def add_task(self, task: dict) -> bool:
+        task_id = task.get("id")
+        if not task_id:
+            raise ValueError("Task must have an 'id' field")
+
+        now_iso = datetime.now().isoformat()
+        created_at = task.get("created_at") or now_iso
+        updated_at = task.get("updated_at") or created_at
+        enabled = bool(task.get("enabled", True))
+        next_run_at = task.get("next_run_at")
+        data = json.dumps(task, ensure_ascii=False)
+
+        with self.lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    INSERT INTO scheduler_tasks(id, enabled, next_run_at, created_at, updated_at, data)
+                    VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                    """,
+                    (task_id, enabled, next_run_at, created_at, updated_at, data),
+                )
+                conn.commit()
+                return True
+            except Exception as e:
+                conn.rollback()
+                if "duplicate key value" in str(e) or "unique constraint" in str(e):
+                    raise ValueError(f"Task with id '{task_id}' already exists")
+                raise
+            finally:
+                conn.close()
+
+    def update_task(self, task_id: str, updates: dict) -> bool:
+        with self.lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT data, created_at FROM scheduler_tasks WHERE id = %s", (task_id,))
+                row = cur.fetchone()
+                if not row:
+                    raise ValueError(f"Task '{task_id}' not found")
+                raw_data, created_at = row
+                task = raw_data if isinstance(raw_data, dict) else {}
+                if not isinstance(task, dict):
+                    task = {}
+                task.update(updates or {})
+                task["id"] = task_id
+                task["updated_at"] = datetime.now().isoformat()
+                if not task.get("created_at"):
+                    task["created_at"] = created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at)
+
+                enabled = bool(task.get("enabled", True))
+                next_run_at = task.get("next_run_at")
+                data = json.dumps(task, ensure_ascii=False)
+                cur.execute(
+                    """
+                    UPDATE scheduler_tasks
+                    SET enabled = %s, next_run_at = %s, updated_at = %s, data = %s::jsonb
+                    WHERE id = %s
+                    """,
+                    (enabled, next_run_at, task["updated_at"], data, task_id),
+                )
+                conn.commit()
+                return True
+            finally:
+                conn.close()
+
+    def delete_task(self, task_id: str) -> bool:
+        with self.lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute("DELETE FROM scheduler_tasks WHERE id = %s", (task_id,))
+                if cur.rowcount == 0:
+                    raise ValueError(f"Task '{task_id}' not found")
+                conn.commit()
+                return True
+            finally:
+                conn.close()
+
+    def get_task(self, task_id: str) -> Optional[dict]:
+        with self.lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT data FROM scheduler_tasks WHERE id = %s", (task_id,))
+                row = cur.fetchone()
+                if not row:
+                    return None
+                data = row[0]
+                if isinstance(data, dict):
+                    return data
+                try:
+                    decoded = json.loads(data)
+                    return decoded if isinstance(decoded, dict) else None
+                except Exception:
+                    return None
+            finally:
+                conn.close()
+
+    def list_tasks(self, enabled_only: bool = False) -> List[dict]:
+        with self.lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                if enabled_only:
+                    cur.execute(
+                        "SELECT data FROM scheduler_tasks WHERE enabled = TRUE ORDER BY (next_run_at IS NULL) ASC, next_run_at ASC"
+                    )
+                else:
+                    cur.execute(
+                        "SELECT data FROM scheduler_tasks ORDER BY (next_run_at IS NULL) ASC, next_run_at ASC"
+                    )
+                out: List[dict] = []
+                for (data,) in cur.fetchall():
+                    if isinstance(data, dict):
+                        out.append(data)
+                    else:
+                        try:
+                            decoded = json.loads(data)
+                            if isinstance(decoded, dict):
+                                out.append(decoded)
+                        except Exception:
+                            continue
+                return out
+            finally:
+                conn.close()
+
+    def enable_task(self, task_id: str, enabled: bool = True) -> bool:
+        return self.update_task(task_id, {"enabled": enabled})
+
+
+class TaskStore:
+    def __init__(self, store_path: str = None, database_url: Optional[str] = None):
+        if store_path is None:
+            home = expand_path("~")
+            store_path = os.path.join(home, "cow", "scheduler", "tasks.db")
+
+        db_url = _get_database_url(database_url)
+        if db_url:
+            impl = _PostgresTaskStore(db_url)
+            impl.migrate_from_sqlite(store_path if store_path.lower().endswith(".db") else "")
+            self._impl = impl
+        else:
+            self._impl = _SQLiteTaskStore(store_path)
+
+    def load_tasks(self) -> Dict[str, dict]:
+        return self._impl.load_tasks()
+
+    def save_tasks(self, tasks: Dict[str, dict]):
+        return self._impl.save_tasks(tasks)
+
+    def add_task(self, task: dict) -> bool:
+        return self._impl.add_task(task)
+
+    def update_task(self, task_id: str, updates: dict) -> bool:
+        return self._impl.update_task(task_id, updates)
+
+    def delete_task(self, task_id: str) -> bool:
+        return self._impl.delete_task(task_id)
+
+    def get_task(self, task_id: str) -> Optional[dict]:
+        return self._impl.get_task(task_id)
+
+    def list_tasks(self, enabled_only: bool = False) -> List[dict]:
+        return self._impl.list_tasks(enabled_only=enabled_only)
+
+    def enable_task(self, task_id: str, enabled: bool = True) -> bool:
+        return self._impl.enable_task(task_id, enabled=enabled)

@@ -46,3 +46,9 @@ dist/
 build/
 *.egg-info/
 .cow.pid
+
+# docker local volumes (contain secrets / runtime data)
+docker/cow/
+docker/cow-dot/
+docker/weixin-credentials.json
+docker/pgdata/

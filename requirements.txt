@@ -10,6 +10,7 @@ PyYAML>=6.0
 croniter>=2.0.0
 click>=8.0
 qrcode
+psycopg2-binary>=2.9.9
 
 # wechatcom & wechatmp
 wechatpy

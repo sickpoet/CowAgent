@@ -35,8 +35,108 @@ QR_LOGIN_TIMEOUT_S = 480
 QR_MAX_REFRESHES = 10
 
 
+def _get_database_url() -> str:
+    env_url = (os.environ.get("DATABASE_URL") or "").strip()
+    if env_url:
+        return env_url
+    try:
+        from config import conf
+        return (conf().get("database_url") or "").strip()
+    except Exception:
+        return ""
+
+
+def _ensure_weixin_credentials_table(conn) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS weixin_credentials (
+            id TEXT PRIMARY KEY,
+            token TEXT NOT NULL DEFAULT '',
+            base_url TEXT NOT NULL DEFAULT '',
+            bot_id TEXT NOT NULL DEFAULT '',
+            user_id TEXT NOT NULL DEFAULT '',
+            updated_at BIGINT NOT NULL
+        )
+        """
+    )
+
+
+def _load_credentials_from_db(db_url: str) -> dict:
+    if not db_url:
+        return {}
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url)
+        try:
+            _ensure_weixin_credentials_table(conn)
+            conn.commit()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT token, base_url, bot_id, user_id FROM weixin_credentials WHERE id = %s",
+                ("default",),
+            )
+            row = cur.fetchone()
+            if not row:
+                return {}
+            token, base_url, bot_id, user_id = row
+            data = {
+                "token": token or "",
+                "base_url": base_url or "",
+                "bot_id": bot_id or "",
+                "user_id": user_id or "",
+            }
+            return data if data.get("token") else {}
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"[Weixin] Failed to load credentials from DB: {e}")
+        return {}
+
+
+def _save_credentials_to_db(db_url: str, data: dict) -> None:
+    if not db_url:
+        return
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url)
+        try:
+            _ensure_weixin_credentials_table(conn)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO weixin_credentials(id, token, base_url, bot_id, user_id, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    token = EXCLUDED.token,
+                    base_url = EXCLUDED.base_url,
+                    bot_id = EXCLUDED.bot_id,
+                    user_id = EXCLUDED.user_id,
+                    updated_at = EXCLUDED.updated_at
+                """,
+                (
+                    "default",
+                    data.get("token", "") or "",
+                    data.get("base_url", "") or "",
+                    data.get("bot_id", "") or "",
+                    data.get("user_id", "") or "",
+                    int(time.time()),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"[Weixin] Failed to save credentials to DB: {e}")
+
+
 def _load_credentials(cred_path: str) -> dict:
     """Load saved credentials from JSON file."""
+    db_url = _get_database_url()
+    if db_url:
+        data = _load_credentials_from_db(db_url)
+        if data:
+            return data
     try:
         if os.path.exists(cred_path):
             with open(cred_path, "r") as f:
@@ -48,6 +148,9 @@ def _load_credentials(cred_path: str) -> dict:
 
 def _save_credentials(cred_path: str, data: dict):
     """Save credentials to JSON file."""
+    db_url = _get_database_url()
+    if db_url:
+        _save_credentials_to_db(db_url, data)
     os.makedirs(os.path.dirname(cred_path), exist_ok=True)
     with open(cred_path, "w") as f:
         json.dump(data, f, indent=2)
@@ -88,9 +191,15 @@ class WeixinChannel(ChatChannel):
         cdn_base_url = conf().get("weixin_cdn_base_url", CDN_BASE_URL)
         token = conf().get("weixin_token", "")
 
-        self._credentials_path = os.path.expanduser(
-            conf().get("weixin_credentials_path", "~/.weixin_cow_credentials.json")
-        )
+        configured_path = conf().get("weixin_credentials_path", "").strip()
+        if configured_path:
+            self._credentials_path = os.path.expanduser(configured_path)
+        else:
+            from common.utils import expand_path
+            workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+            default_path = os.path.join(workspace_root, "weixin_credentials.json")
+            legacy_path = os.path.expanduser("~/.weixin_cow_credentials.json")
+            self._credentials_path = legacy_path if os.path.exists(legacy_path) and not os.path.exists(default_path) else default_path
 
         if not token:
             creds = _load_credentials(self._credentials_path)

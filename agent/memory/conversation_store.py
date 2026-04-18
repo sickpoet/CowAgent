@@ -13,6 +13,7 @@ Storage path: ~/cow/sessions/conversations.db
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -68,6 +69,19 @@ ALTER TABLE sessions ADD COLUMN context_start_seq INTEGER NOT NULL DEFAULT 0;
 """
 
 DEFAULT_MAX_AGE_DAYS: int = 30
+
+
+def _get_database_url(explicit: Optional[str] = None) -> str:
+    if explicit is not None:
+        return explicit.strip()
+    env_url = (os.environ.get("DATABASE_URL") or "").strip()
+    if env_url:
+        return env_url
+    try:
+        from config import conf
+        return (conf().get("database_url") or "").strip()
+    except Exception:
+        return ""
 
 
 def _is_visible_user_message(content: Any) -> bool:
@@ -253,7 +267,7 @@ def _group_into_display_turns(
     return turns
 
 
-class ConversationStore:
+class _SQLiteConversationStore:
     """
     SQLite-backed store for per-session conversation history.
 
@@ -799,6 +813,441 @@ class ConversationStore:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         return conn
+
+
+class _PostgresConversationStore:
+    def __init__(self, database_url: str):
+        self._database_url = database_url
+        self._lock = threading.Lock()
+        self._init_db()
+
+    def _connect(self):
+        import psycopg2
+        return psycopg2.connect(self._database_url)
+
+    def _init_db(self) -> None:
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS sessions (
+                        session_id TEXT PRIMARY KEY,
+                        channel_type TEXT NOT NULL DEFAULT '',
+                        title TEXT NOT NULL DEFAULT '',
+                        context_start_seq INTEGER NOT NULL DEFAULT 0,
+                        created_at BIGINT NOT NULL,
+                        last_active BIGINT NOT NULL,
+                        msg_count INTEGER NOT NULL DEFAULT 0
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS messages (
+                        id BIGSERIAL PRIMARY KEY,
+                        session_id TEXT NOT NULL,
+                        seq INTEGER NOT NULL,
+                        role TEXT NOT NULL,
+                        content JSONB NOT NULL,
+                        created_at BIGINT NOT NULL,
+                        UNIQUE (session_id, seq)
+                    )
+                    """
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq)"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_sessions_last_active ON sessions(last_active)"
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def load_messages(self, session_id: str, max_turns: int = 30) -> List[Dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT context_start_seq FROM sessions WHERE session_id = %s",
+                    (session_id,),
+                )
+                row = cur.fetchone()
+                ctx_start = int(row[0]) if row else 0
+
+                cur.execute(
+                    """
+                    SELECT seq, role, content
+                    FROM messages
+                    WHERE session_id = %s AND seq >= %s
+                    ORDER BY seq DESC
+                    """,
+                    (session_id, ctx_start),
+                )
+                rows = cur.fetchall()
+            finally:
+                conn.close()
+
+        if not rows:
+            return []
+
+        visible_turn_seqs: List[int] = []
+        for seq, role, content in rows:
+            if role != "user":
+                continue
+            if _is_visible_user_message(content):
+                visible_turn_seqs.append(int(seq))
+
+        cutoff_seq = None if len(visible_turn_seqs) <= max_turns else visible_turn_seqs[max_turns - 1]
+
+        result: List[Dict[str, Any]] = []
+        for seq, role, content in reversed(rows):
+            if cutoff_seq is not None and int(seq) < cutoff_seq:
+                continue
+            if role == "assistant" and isinstance(content, list):
+                content = [b for b in content if b.get("type") != "thinking"]
+            result.append({"role": role, "content": content})
+        return result
+
+    def append_messages(self, session_id: str, messages: List[Dict[str, Any]], channel_type: str = "") -> None:
+        if not messages:
+            return
+
+        now = int(time.time())
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    INSERT INTO sessions(session_id, channel_type, created_at, last_active, msg_count)
+                    VALUES (%s, %s, %s, %s, 0)
+                    ON CONFLICT (session_id) DO NOTHING
+                    """,
+                    (session_id, channel_type, now, now),
+                )
+                cur.execute(
+                    "UPDATE sessions SET last_active = %s WHERE session_id = %s",
+                    (now, session_id),
+                )
+                cur.execute(
+                    "SELECT COALESCE(MAX(seq), -1) FROM messages WHERE session_id = %s",
+                    (session_id,),
+                )
+                next_seq = int(cur.fetchone()[0]) + 1
+
+                for msg in messages:
+                    role = msg.get("role", "")
+                    content = msg.get("content", "")
+                    cur.execute(
+                        """
+                        INSERT INTO messages(session_id, seq, role, content, created_at)
+                        VALUES (%s, %s, %s, %s::jsonb, %s)
+                        ON CONFLICT (session_id, seq) DO NOTHING
+                        """,
+                        (session_id, next_seq, role, json.dumps(content, ensure_ascii=False), now),
+                    )
+                    next_seq += 1
+
+                cur.execute(
+                    """
+                    UPDATE sessions
+                    SET msg_count = (
+                        SELECT COUNT(*) FROM messages WHERE session_id = %s
+                    )
+                    WHERE session_id = %s
+                    """,
+                    (session_id, session_id),
+                )
+
+                cur.execute(
+                    "SELECT title FROM sessions WHERE session_id = %s",
+                    (session_id,),
+                )
+                cur_title = cur.fetchone()
+                if cur_title and not (cur_title[0] or ""):
+                    for msg in messages:
+                        if msg.get("role") == "user":
+                            text = _extract_display_text(msg.get("content", ""))
+                            if text:
+                                title = text[:50].split("\n")[0]
+                                cur.execute(
+                                    "UPDATE sessions SET title = %s WHERE session_id = %s",
+                                    (title, session_id),
+                                )
+                                break
+
+                conn.commit()
+            finally:
+                conn.close()
+
+    def clear_context(self, session_id: str) -> int:
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT COALESCE(MAX(seq), -1) FROM messages WHERE session_id = %s",
+                    (session_id,),
+                )
+                new_start = int(cur.fetchone()[0]) + 1
+                cur.execute(
+                    "UPDATE sessions SET context_start_seq = %s WHERE session_id = %s",
+                    (new_start, session_id),
+                )
+                conn.commit()
+                return new_start
+            finally:
+                conn.close()
+
+    def get_context_start_seq(self, session_id: str) -> int:
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT context_start_seq FROM sessions WHERE session_id = %s",
+                    (session_id,),
+                )
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+            finally:
+                conn.close()
+
+    def clear_session(self, session_id: str) -> None:
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute("DELETE FROM messages WHERE session_id = %s", (session_id,))
+                cur.execute("DELETE FROM sessions WHERE session_id = %s", (session_id,))
+                conn.commit()
+            finally:
+                conn.close()
+
+    def cleanup_old_sessions(self, max_age_days: Optional[int] = None) -> int:
+        try:
+            from config import conf
+            max_age = max_age_days or conf().get(
+                "conversation_max_age_days", DEFAULT_MAX_AGE_DAYS
+            )
+        except Exception:
+            max_age = max_age_days or DEFAULT_MAX_AGE_DAYS
+
+        cutoff = int(time.time()) - int(max_age) * 86400
+        deleted = 0
+
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT session_id FROM sessions WHERE last_active < %s AND channel_type != 'web'",
+                    (cutoff,),
+                )
+                stale = [r[0] for r in cur.fetchall()]
+                for sid in stale:
+                    cur.execute("DELETE FROM messages WHERE session_id = %s", (sid,))
+                    cur.execute("DELETE FROM sessions WHERE session_id = %s", (sid,))
+                    deleted += 1
+                conn.commit()
+            finally:
+                conn.close()
+
+        if deleted:
+            logger.info(f"[ConversationStore] Pruned {deleted} expired sessions")
+        return deleted
+
+    def load_history_page(self, session_id: str, page: int = 1, page_size: int = 20) -> Dict[str, Any]:
+        page = max(1, page)
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT context_start_seq FROM sessions WHERE session_id = %s",
+                    (session_id,),
+                )
+                row = cur.fetchone()
+                ctx_start = int(row[0]) if row else 0
+
+                cur.execute(
+                    """
+                    SELECT seq, role, content, created_at
+                    FROM messages
+                    WHERE session_id = %s
+                    ORDER BY seq ASC
+                    """,
+                    (session_id,),
+                )
+                rows = cur.fetchall()
+            finally:
+                conn.close()
+
+        plain_rows = [
+            (role, json.dumps(content, ensure_ascii=False), int(created_at))
+            for _seq, role, content, created_at in rows
+        ]
+        visible = _group_into_display_turns(plain_rows)
+
+        visible_user_seqs: List[int] = []
+        for seq, role, content, _ts in rows:
+            if role != "user":
+                continue
+            if _is_visible_user_message(content):
+                visible_user_seqs.append(int(seq))
+
+        user_turn_idx = 0
+        for turn in visible:
+            if turn["role"] == "user" and user_turn_idx < len(visible_user_seqs):
+                turn["_seq"] = visible_user_seqs[user_turn_idx]
+                user_turn_idx += 1
+
+        total = len(visible)
+        offset = (page - 1) * page_size
+        page_items = list(reversed(visible))[offset: offset + page_size]
+        page_items = list(reversed(page_items))
+
+        return {
+            "messages": page_items,
+            "context_start_seq": ctx_start,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "has_more": offset + page_size < total,
+        }
+
+    def list_sessions(self, channel_type: Optional[str] = None, page: int = 1, page_size: int = 50) -> Dict[str, Any]:
+        page = max(1, page)
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                if channel_type:
+                    cur.execute("SELECT COUNT(*) FROM sessions WHERE channel_type = %s", (channel_type,))
+                    total = int(cur.fetchone()[0])
+                    cur.execute(
+                        """
+                        SELECT session_id, title, created_at, last_active, msg_count
+                        FROM sessions
+                        WHERE channel_type = %s
+                        ORDER BY last_active DESC
+                        LIMIT %s OFFSET %s
+                        """,
+                        (channel_type, page_size, (page - 1) * page_size),
+                    )
+                    rows = cur.fetchall()
+                else:
+                    cur.execute("SELECT COUNT(*) FROM sessions")
+                    total = int(cur.fetchone()[0])
+                    cur.execute(
+                        """
+                        SELECT session_id, title, created_at, last_active, msg_count
+                        FROM sessions
+                        ORDER BY last_active DESC
+                        LIMIT %s OFFSET %s
+                        """,
+                        (page_size, (page - 1) * page_size),
+                    )
+                    rows = cur.fetchall()
+            finally:
+                conn.close()
+
+        sessions = [
+            {
+                "session_id": r[0],
+                "title": r[1],
+                "created_at": int(r[2]),
+                "last_active": int(r[3]),
+                "msg_count": int(r[4]),
+            }
+            for r in rows
+        ]
+        return {
+            "sessions": sessions,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "has_more": (page - 1) * page_size + page_size < total,
+        }
+
+    def rename_session(self, session_id: str, title: str) -> bool:
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE sessions SET title = %s WHERE session_id = %s",
+                    (title, session_id),
+                )
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                conn.close()
+
+    def get_stats(self) -> Dict[str, Any]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) FROM sessions")
+                total_sessions = int(cur.fetchone()[0])
+                cur.execute("SELECT COUNT(*) FROM messages")
+                total_messages = int(cur.fetchone()[0])
+                cur.execute(
+                    """
+                    SELECT channel_type, COUNT(*) as cnt
+                    FROM sessions
+                    GROUP BY channel_type
+                    ORDER BY cnt DESC
+                    """
+                )
+                return {
+                    "total_sessions": total_sessions,
+                    "total_messages": total_messages,
+                    "by_channel": {r[0] or "unknown": int(r[1]) for r in cur.fetchall()},
+                }
+            finally:
+                conn.close()
+
+
+class ConversationStore:
+    def __init__(self, db_path: Path, database_url: Optional[str] = None):
+        db_url = _get_database_url(database_url)
+        self._impl = _PostgresConversationStore(db_url) if db_url else _SQLiteConversationStore(db_path)
+
+    def load_messages(self, session_id: str, max_turns: int = 30) -> List[Dict[str, Any]]:
+        return self._impl.load_messages(session_id, max_turns=max_turns)
+
+    def append_messages(self, session_id: str, messages: List[Dict[str, Any]], channel_type: str = "") -> None:
+        return self._impl.append_messages(session_id, messages, channel_type=channel_type)
+
+    def clear_context(self, session_id: str) -> int:
+        return self._impl.clear_context(session_id)
+
+    def get_context_start_seq(self, session_id: str) -> int:
+        return self._impl.get_context_start_seq(session_id)
+
+    def clear_session(self, session_id: str) -> None:
+        return self._impl.clear_session(session_id)
+
+    def cleanup_old_sessions(self, max_age_days: Optional[int] = None) -> int:
+        return self._impl.cleanup_old_sessions(max_age_days=max_age_days)
+
+    def load_history_page(self, session_id: str, page: int = 1, page_size: int = 20) -> Dict[str, Any]:
+        return self._impl.load_history_page(session_id=session_id, page=page, page_size=page_size)
+
+    def list_sessions(self, channel_type: Optional[str] = None, page: int = 1, page_size: int = 50) -> Dict[str, Any]:
+        return self._impl.list_sessions(channel_type=channel_type, page=page, page_size=page_size)
+
+    def rename_session(self, session_id: str, title: str) -> bool:
+        return self._impl.rename_session(session_id, title)
+
+    def get_stats(self) -> Dict[str, Any]:
+        return self._impl.get_stats()
 
 
 # ---------------------------------------------------------------------------

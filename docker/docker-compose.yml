@@ -42,7 +42,21 @@ services:
       AGENT_MAX_STEPS: 20
       KNOWLEDGE_GIT_SYNC_ENABLED: 'False'
       WORKSPACE_GIT_SYNC_ENABLED: 'False'
+      DATABASE_URL: 'postgresql://cow:cowpass@postgres:5432/cowagent'
+    depends_on:
+      - postgres
     volumes:
       - ./cow:/home/agent/cow
       - ./cow-dot:/home/agent/.cow
-      - ./weixin-credentials.json:/home/agent/.weixin_cow_credentials.json
+
+  postgres:
+    image: postgres:16
+    container_name: cowagent-postgres
+    environment:
+      POSTGRES_DB: cowagent
+      POSTGRES_USER: cow
+      POSTGRES_PASSWORD: cowpass
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data

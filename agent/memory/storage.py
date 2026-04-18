@@ -5,9 +5,11 @@ Provides vector and keyword search capabilities
 """
 
 from __future__ import annotations
+import os
 import sqlite3
 import json
 import hashlib
+import threading
 from typing import List, Dict, Optional, Any
 from pathlib import Path
 from dataclasses import dataclass
@@ -41,7 +43,20 @@ class SearchResult:
     user_id: Optional[str] = None
 
 
-class MemoryStorage:
+def _get_database_url(explicit: Optional[str] = None) -> str:
+    if explicit is not None:
+        return explicit.strip()
+    env_url = (os.environ.get("DATABASE_URL") or "").strip()
+    if env_url:
+        return env_url
+    try:
+        from config import conf
+        return (conf().get("database_url") or "").strip()
+    except Exception:
+        return ""
+
+
+class _SQLiteMemoryStorage:
     """SQLite-based storage with FTS5 for keyword search"""
     
     def __init__(self, db_path: Path):
@@ -336,7 +351,7 @@ class MemoryStorage:
                 return fts_results
         
         # Fallback to LIKE search (always for CJK, or if FTS5 not available)
-        if not self.fts5_available or MemoryStorage._contains_cjk(query):
+        if not self.fts5_available or _SQLiteMemoryStorage._contains_cjk(query):
             return self._search_like(query, user_id, scopes, limit)
         
         return []
@@ -587,3 +602,419 @@ class MemoryStorage:
     def compute_hash(content: str) -> str:
         """Compute SHA256 hash of content"""
         return hashlib.sha256(content.encode('utf-8')).hexdigest()
+
+
+class _PostgresMemoryStorage:
+    def __init__(self, database_url: str):
+        self.database_url = database_url
+        self.lock = threading.Lock()
+        self._init_db()
+
+    def _connect(self):
+        import psycopg2
+        return psycopg2.connect(self.database_url)
+
+    def _init_db(self):
+        with self.lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS chunks (
+                        id TEXT PRIMARY KEY,
+                        user_id TEXT,
+                        scope TEXT NOT NULL DEFAULT 'shared',
+                        source TEXT NOT NULL DEFAULT 'memory',
+                        path TEXT NOT NULL,
+                        start_line INTEGER NOT NULL,
+                        end_line INTEGER NOT NULL,
+                        text TEXT NOT NULL,
+                        embedding JSONB,
+                        hash TEXT NOT NULL,
+                        metadata JSONB,
+                        created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+                        updated_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
+                    )
+                    """
+                )
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_chunks_user ON chunks(user_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_chunks_scope ON chunks(scope)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_chunks_hash ON chunks(path, hash)")
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON chunks USING GIN (to_tsvector('simple', text))"
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS files (
+                        path TEXT PRIMARY KEY,
+                        source TEXT NOT NULL DEFAULT 'memory',
+                        hash TEXT NOT NULL,
+                        mtime BIGINT NOT NULL,
+                        size BIGINT NOT NULL,
+                        updated_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
+                    )
+                    """
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def save_chunk(self, chunk: MemoryChunk):
+        with self.lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    INSERT INTO chunks
+                        (id, user_id, scope, source, path, start_line, end_line, text, embedding, hash, metadata, updated_at)
+                    VALUES
+                        (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, EXTRACT(EPOCH FROM NOW())::BIGINT)
+                    ON CONFLICT (id) DO UPDATE SET
+                        user_id = EXCLUDED.user_id,
+                        scope = EXCLUDED.scope,
+                        source = EXCLUDED.source,
+                        path = EXCLUDED.path,
+                        start_line = EXCLUDED.start_line,
+                        end_line = EXCLUDED.end_line,
+                        text = EXCLUDED.text,
+                        embedding = EXCLUDED.embedding,
+                        hash = EXCLUDED.hash,
+                        metadata = EXCLUDED.metadata,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (
+                        chunk.id,
+                        chunk.user_id,
+                        chunk.scope,
+                        chunk.source,
+                        chunk.path,
+                        chunk.start_line,
+                        chunk.end_line,
+                        chunk.text,
+                        json.dumps(chunk.embedding) if chunk.embedding else None,
+                        chunk.hash,
+                        json.dumps(chunk.metadata) if chunk.metadata else None,
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def save_chunks_batch(self, chunks: List[MemoryChunk]):
+        if not chunks:
+            return
+        import psycopg2.extras
+        rows = [
+            (
+                c.id,
+                c.user_id,
+                c.scope,
+                c.source,
+                c.path,
+                c.start_line,
+                c.end_line,
+                c.text,
+                json.dumps(c.embedding) if c.embedding else None,
+                c.hash,
+                json.dumps(c.metadata) if c.metadata else None,
+            )
+            for c in chunks
+        ]
+        with self.lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                psycopg2.extras.execute_batch(
+                    cur,
+                    """
+                    INSERT INTO chunks
+                        (id, user_id, scope, source, path, start_line, end_line, text, embedding, hash, metadata, updated_at)
+                    VALUES
+                        (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, EXTRACT(EPOCH FROM NOW())::BIGINT)
+                    ON CONFLICT (id) DO UPDATE SET
+                        user_id = EXCLUDED.user_id,
+                        scope = EXCLUDED.scope,
+                        source = EXCLUDED.source,
+                        path = EXCLUDED.path,
+                        start_line = EXCLUDED.start_line,
+                        end_line = EXCLUDED.end_line,
+                        text = EXCLUDED.text,
+                        embedding = EXCLUDED.embedding,
+                        hash = EXCLUDED.hash,
+                        metadata = EXCLUDED.metadata,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    rows,
+                    page_size=200,
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def get_chunk(self, chunk_id: str) -> Optional[MemoryChunk]:
+        with self.lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT id, user_id, scope, source, path, start_line, end_line, text, embedding, hash, metadata FROM chunks WHERE id = %s", (chunk_id,))
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return MemoryChunk(
+                    id=row[0],
+                    user_id=row[1],
+                    scope=row[2],
+                    source=row[3],
+                    path=row[4],
+                    start_line=int(row[5]),
+                    end_line=int(row[6]),
+                    text=row[7],
+                    embedding=row[8] if isinstance(row[8], list) else (json.loads(row[8]) if row[8] else None),
+                    hash=row[9],
+                    metadata=row[10] if isinstance(row[10], dict) else (json.loads(row[10]) if row[10] else None),
+                )
+            finally:
+                conn.close()
+
+    def search_vector(self, query_embedding: List[float], user_id: Optional[str] = None, scopes: List[str] = None, limit: int = 10) -> List[SearchResult]:
+        if scopes is None:
+            scopes = ["shared"]
+            if user_id:
+                scopes.append("user")
+
+        params: List[Any] = [scopes]
+        where_parts = ["scope = ANY(%s)", "embedding IS NOT NULL"]
+        if user_id:
+            where_parts.append("(scope = 'shared' OR user_id = %s)")
+            params.append(user_id)
+        where_sql = " AND ".join(where_parts)
+        sql = f"SELECT path, start_line, end_line, text, source, user_id, embedding FROM chunks WHERE {where_sql} LIMIT 2000"
+
+        with self.lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall()
+            finally:
+                conn.close()
+
+        scored = []
+        for path, start_line, end_line, text, source, uid, embedding in rows:
+            emb = embedding
+            if not isinstance(emb, list):
+                try:
+                    emb = json.loads(emb) if emb else None
+                except Exception:
+                    emb = None
+            if not emb:
+                continue
+            sim = _SQLiteMemoryStorage._cosine_similarity(query_embedding, emb)
+            if sim > 0:
+                scored.append((sim, path, start_line, end_line, text, source, uid))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        scored = scored[:limit]
+        return [
+            SearchResult(
+                path=path,
+                start_line=int(start_line),
+                end_line=int(end_line),
+                score=float(score),
+                snippet=_SQLiteMemoryStorage._truncate_text(text, 500),
+                source=source,
+                user_id=uid,
+            )
+            for score, path, start_line, end_line, text, source, uid in scored
+        ]
+
+    def search_keyword(self, query: str, user_id: Optional[str] = None, scopes: List[str] = None, limit: int = 10) -> List[SearchResult]:
+        if scopes is None:
+            scopes = ["shared"]
+            if user_id:
+                scopes.append("user")
+
+        if _SQLiteMemoryStorage._contains_cjk(query):
+            return self._search_like(query, user_id, scopes, limit)
+        return self._search_fts(query, user_id, scopes, limit)
+
+    def _search_fts(self, query: str, user_id: Optional[str], scopes: List[str], limit: int) -> List[SearchResult]:
+        where_parts = ["scope = ANY(%s)", "to_tsvector('simple', text) @@ plainto_tsquery('simple', %s)"]
+        params: List[Any] = [scopes, query]
+        if user_id:
+            where_parts.append("(scope = 'shared' OR user_id = %s)")
+            params.append(user_id)
+        where_sql = " AND ".join(where_parts)
+        sql = f"""
+            SELECT path, start_line, end_line, text, source, user_id
+            FROM chunks
+            WHERE {where_sql}
+            LIMIT %s
+        """
+        params.append(limit)
+        with self.lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall()
+            finally:
+                conn.close()
+
+        return [
+            SearchResult(
+                path=r[0],
+                start_line=int(r[1]),
+                end_line=int(r[2]),
+                score=0.5,
+                snippet=_SQLiteMemoryStorage._truncate_text(r[3], 500),
+                source=r[4],
+                user_id=r[5],
+            )
+            for r in rows
+        ]
+
+    def _search_like(self, query: str, user_id: Optional[str], scopes: List[str], limit: int) -> List[SearchResult]:
+        import re
+        cjk_words = re.findall(r'[\u4e00-\u9fff]{2,}', query)
+        if not cjk_words:
+            return []
+        like_clauses = []
+        params: List[Any] = [scopes]
+        for w in cjk_words:
+            like_clauses.append("text ILIKE %s")
+            params.append(f"%{w}%")
+        where_parts = [f"scope = ANY(%s)", "(" + " OR ".join(like_clauses) + ")"]
+        if user_id:
+            where_parts.append("(scope = 'shared' OR user_id = %s)")
+            params.append(user_id)
+        where_sql = " AND ".join(where_parts)
+        sql = f"""
+            SELECT path, start_line, end_line, text, source, user_id
+            FROM chunks
+            WHERE {where_sql}
+            LIMIT %s
+        """
+        params.append(limit)
+        with self.lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall()
+            finally:
+                conn.close()
+
+        return [
+            SearchResult(
+                path=r[0],
+                start_line=int(r[1]),
+                end_line=int(r[2]),
+                score=0.5,
+                snippet=_SQLiteMemoryStorage._truncate_text(r[3], 500),
+                source=r[4],
+                user_id=r[5],
+            )
+            for r in rows
+        ]
+
+    def delete_by_path(self, path: str):
+        with self.lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute("DELETE FROM chunks WHERE path = %s", (path,))
+                conn.commit()
+            finally:
+                conn.close()
+
+    def get_file_hash(self, path: str) -> Optional[str]:
+        with self.lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT hash FROM files WHERE path = %s", (path,))
+                row = cur.fetchone()
+                return row[0] if row else None
+            finally:
+                conn.close()
+
+    def update_file_metadata(self, path: str, source: str, file_hash: str, mtime: int, size: int):
+        with self.lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    INSERT INTO files(path, source, hash, mtime, size, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, EXTRACT(EPOCH FROM NOW())::BIGINT)
+                    ON CONFLICT (path) DO UPDATE SET
+                        source = EXCLUDED.source,
+                        hash = EXCLUDED.hash,
+                        mtime = EXCLUDED.mtime,
+                        size = EXCLUDED.size,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (path, source, file_hash, int(mtime), int(size)),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def get_stats(self) -> Dict[str, int]:
+        with self.lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) FROM chunks")
+                chunks_count = int(cur.fetchone()[0])
+                cur.execute("SELECT COUNT(*) FROM files")
+                files_count = int(cur.fetchone()[0])
+                return {"chunks": chunks_count, "files": files_count}
+            finally:
+                conn.close()
+
+    def close(self):
+        return
+
+
+class MemoryStorage:
+    def __init__(self, db_path: Path, database_url: Optional[str] = None):
+        db_url = _get_database_url(database_url)
+        self._impl = _PostgresMemoryStorage(db_url) if db_url else _SQLiteMemoryStorage(db_path)
+
+    def save_chunk(self, chunk: MemoryChunk):
+        return self._impl.save_chunk(chunk)
+
+    def save_chunks_batch(self, chunks: List[MemoryChunk]):
+        return self._impl.save_chunks_batch(chunks)
+
+    def get_chunk(self, chunk_id: str) -> Optional[MemoryChunk]:
+        return self._impl.get_chunk(chunk_id)
+
+    def search_vector(self, query_embedding: List[float], user_id: Optional[str] = None, scopes: List[str] = None, limit: int = 10) -> List[SearchResult]:
+        return self._impl.search_vector(query_embedding, user_id=user_id, scopes=scopes, limit=limit)
+
+    def search_keyword(self, query: str, user_id: Optional[str] = None, scopes: List[str] = None, limit: int = 10) -> List[SearchResult]:
+        return self._impl.search_keyword(query, user_id=user_id, scopes=scopes, limit=limit)
+
+    def delete_by_path(self, path: str):
+        return self._impl.delete_by_path(path)
+
+    def get_file_hash(self, path: str) -> Optional[str]:
+        return self._impl.get_file_hash(path)
+
+    def update_file_metadata(self, path: str, source: str, file_hash: str, mtime: int, size: int):
+        return self._impl.update_file_metadata(path, source, file_hash, mtime, size)
+
+    def get_stats(self) -> Dict[str, int]:
+        return self._impl.get_stats()
+
+    def close(self):
+        return self._impl.close()
+
+    @staticmethod
+    def compute_hash(content: str) -> str:
+        return _SQLiteMemoryStorage.compute_hash(content)
