@@ -187,6 +187,36 @@ const I18N = {
 
 let currentLang = localStorage.getItem('cow_lang') || 'zh';
 
+const _TZ_BEIJING = 'Asia/Shanghai';
+function formatDateTimeBeijing(input) {
+    if (!input) return '--';
+    let d = input instanceof Date ? input : new Date(input);
+    if (d instanceof Date && isNaN(d.getTime())) {
+        if (typeof input === 'string') {
+            const s = input.trim();
+            const hasTz = /[zZ]$|[+-]\d{2}:\d{2}$/.test(s);
+            if (!hasTz && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(s)) {
+                d = new Date(s + '+08:00');
+            }
+        }
+    }
+    if (isNaN(d.getTime())) return '--';
+    try {
+        return new Intl.DateTimeFormat(currentLang === 'zh' ? 'zh-CN' : 'en-US', {
+            timeZone: _TZ_BEIJING,
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false,
+        }).format(d);
+    } catch (_) {
+        return d.toISOString().replace('T', ' ').slice(0, 19) + ' (UTC)';
+    }
+}
+
 function t(key) {
     return (I18N[currentLang] && I18N[currentLang][key]) || (I18N.en[key]) || key;
 }
@@ -3494,8 +3524,7 @@ function loadTasksView() {
             
             let nextRun = '--';
             if (task.next_run_at) {
-                const d = new Date(task.next_run_at);
-                if (!isNaN(d.getTime())) nextRun = d.toLocaleString();
+                nextRun = formatDateTimeBeijing(task.next_run_at);
             }
             
             const description = action.content || action.task_description || task.name || task.id || '';

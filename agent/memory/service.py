@@ -10,10 +10,17 @@ Memory file layout (under workspace_root):
 """
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 from pathlib import Path
 from common.log import logger
+
+try:
+    from zoneinfo import ZoneInfo
+
+    _BEIJING_TZ = ZoneInfo("Asia/Shanghai")
+except Exception:
+    _BEIJING_TZ = timezone(timedelta(hours=8))
 
 
 class MemoryService:
@@ -188,7 +195,7 @@ class MemoryService:
     def _file_info(path: str, filename: str, file_type: str) -> dict:
         """Build a file metadata dict."""
         stat = os.stat(path)
-        updated_at = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        updated_at = datetime.fromtimestamp(stat.st_mtime, tz=_BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
         return {
             "filename": filename,
             "type": file_type,

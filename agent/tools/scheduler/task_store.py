@@ -697,6 +697,19 @@ class TaskStore:
         else:
             self._impl = _SQLiteTaskStore(store_path)
 
+        try:
+            for task in self.list_tasks() or []:
+                if not isinstance(task, dict):
+                    continue
+                tid = str(task.get("id", ""))
+                if tid == "db_scheduler_smoke_test" or tid.startswith("db_scheduler_"):
+                    try:
+                        self.delete_task(tid)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     def load_tasks(self) -> Dict[str, dict]:
         return self._impl.load_tasks()
 

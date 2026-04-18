@@ -1563,6 +1563,12 @@ class SchedulerHandler:
             store_path = os.path.join(workspace_root, "scheduler", "tasks.db")
             store = TaskStore(store_path)
             tasks = store.list_tasks()
+            tasks = [
+                t for t in (tasks or [])
+                if isinstance(t, dict)
+                and not str(t.get("id", "")).startswith("db_scheduler_")
+                and str(t.get("id", "")) != "db_scheduler_smoke_test"
+            ]
             return json.dumps({"status": "success", "tasks": tasks}, ensure_ascii=False)
         except Exception as e:
             logger.error(f"[WebChannel] Scheduler API error: {e}")

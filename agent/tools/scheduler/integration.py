@@ -38,6 +38,20 @@ def init_scheduler(agent_bridge) -> bool:
         # Create task store
         _task_store = TaskStore(store_path)
         logger.debug(f"[Scheduler] Task store initialized: {store_path}")
+
+        try:
+            for task in _task_store.list_tasks() or []:
+                if not isinstance(task, dict):
+                    continue
+                tid = str(task.get("id", ""))
+                if tid == "db_scheduler_smoke_test" or tid.startswith("db_scheduler_"):
+                    try:
+                        _task_store.delete_task(tid)
+                        logger.info(f"[Scheduler] Removed internal task: {tid}")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         
         # Create execute callback
         def execute_task_callback(task: dict):
