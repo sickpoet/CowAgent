@@ -26,7 +26,7 @@ ADD . ${BUILD_PREFIX}
 RUN apt-get update \
     && apt-get install -y --no-install-recommends bash ffmpeg espeak libavcodec-extra \
     && cd ${BUILD_PREFIX} \
-    && cp config-template.json config.json \
+    && (if [ -f config-template.json ]; then cp config-template.json config.json; else printf '{}' > config.json; fi) \
     && /usr/local/bin/python -m pip install --no-cache --upgrade pip \
     && pip install --no-cache -r requirements.txt \
     && pip install --no-cache -r requirements-optional.txt \
