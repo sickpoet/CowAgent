@@ -171,9 +171,9 @@ def _select_db_ids_for_save(data: dict) -> list[str]:
     return deduped
 
 
-def _save_credentials_to_db(db_url: str, data: dict) -> None:
+def _save_credentials_to_db(db_url: str, data: dict) -> bool:
     if not db_url:
-        return
+        return False
     try:
         import psycopg2
         conn = psycopg2.connect(db_url)
@@ -201,10 +201,21 @@ def _save_credentials_to_db(db_url: str, data: dict) -> None:
                     (cred_id, token, base_url, bot_id, user_id, now_ts),
                 )
             conn.commit()
+            return True
         finally:
             conn.close()
     except Exception as e:
         logger.warning(f"[Weixin] Failed to save credentials to DB: {e}")
+        return False
+
+
+def _mask_id(value: str) -> str:
+    if not value:
+        return ""
+    value = str(value)
+    if len(value) <= 8:
+        return value
+    return value[:4] + "*" * (len(value) - 8) + value[-4:]
 
 
 def _load_credentials(cred_path: str) -> dict:
@@ -234,15 +245,31 @@ def _load_credentials(cred_path: str) -> dict:
 def _save_credentials(cred_path: str, data: dict):
     """Save credentials to JSON file."""
     db_url = _get_database_url()
+    db_saved = False
     if db_url:
-        _save_credentials_to_db(db_url, data)
+        db_saved = _save_credentials_to_db(db_url, data)
     dir_name = os.path.dirname(cred_path)
     if dir_name:
         os.makedirs(dir_name, exist_ok=True)
-    with open(cred_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    try:
+        with open(cred_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.warning(f"[Weixin] Failed to save credentials to file '{cred_path}': {e}")
+        raise
     try:
         os.chmod(cred_path, 0o600)
+    except Exception:
+        pass
+    try:
+        ids = _select_db_ids_for_save(data) if db_url else []
+        bot_id = _mask_id((data or {}).get("bot_id") or "")
+        user_id = _mask_id((data or {}).get("user_id") or "")
+        base_url = (data or {}).get("base_url") or ""
+        logger.info(
+            f"[Weixin] QR credentials saved (file='{cred_path}', db_saved={db_saved}, db_ids={ids}, "
+            f"bot_id={bot_id}, user_id={user_id}, base_url='{base_url}')"
+        )
     except Exception:
         pass
 
