@@ -8,8 +8,10 @@ ARG CHATGPT_ON_WECHAT_VER
 ARG INSTALL_BROWSER=true
 # Set to "true" to use China mirrors for apt / pip / playwright (faster in CN)
 ARG USE_CN_MIRROR=false
+ARG PLAYWRIGHT_DOWNLOAD_HOST=https://registry.npmmirror.com/-/binary/playwright
 
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/ms-playwright
+ENV PLAYWRIGHT_DOWNLOAD_HOST=${PLAYWRIGHT_DOWNLOAD_HOST}
 ENV BUILD_PREFIX=/app
 
 # Optionally switch apt and pip to China mirrors
@@ -34,12 +36,7 @@ RUN apt-get update \
         && pip install --no-cache "playwright==1.52.0" \
         && python -m playwright install-deps chromium \
         && mkdir -p /app/ms-playwright \
-        && if [ "$USE_CN_MIRROR" = "true" ]; then \
-            export PLAYWRIGHT_DOWNLOAD_HOST="https://registry.npmmirror.com/-/binary/playwright" && \
-            python -m playwright install chromium; \
-        else \
-            python -m playwright install chromium; \
-        fi; \
+        && python -m playwright install chromium; \
     fi \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /home/agent/cow \
