@@ -43,6 +43,7 @@ services:
       KNOWLEDGE_GIT_SYNC_ENABLED: 'False'
       WORKSPACE_GIT_SYNC_ENABLED: 'False'
       DATABASE_URL: 'postgresql://cow:cowpass@postgres:5432/cowagent'
+      WEIXIN_STARTUP_NOTIFY: 'True'
     depends_on:
       - postgres
     volumes:

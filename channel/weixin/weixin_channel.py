@@ -253,40 +253,67 @@ def _mask_id(value: str) -> str:
 
 def _load_credentials(cred_path: str) -> tuple[dict, str]:
     """Load saved credentials from JSON file."""
+    file_data = {}
+    file_source = "none"
+    try:
+        if os.path.exists(cred_path):
+            with open(cred_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    file_data = loaded
+                    file_source = "file"
+    except Exception as e:
+        logger.warning(f"[Weixin] Failed to load credentials file: {e}")
+
     db_url = _get_database_url()
     if db_url:
         hint = _get_credentials_id_hint()
         if hint:
             data = _load_credentials_from_db(db_url, hint)
             if data:
-                return data, "db:hint"
+                merged = dict(file_data)
+                merged.update(data)
+                return merged, "db:hint+file" if file_source == "file" else "db:hint"
         data = _load_credentials_from_db(db_url, "default")
         if data:
-            return data, "db:default"
+            merged = dict(file_data)
+            merged.update(data)
+            return merged, "db:default+file" if file_source == "file" else "db:default"
         data = _load_latest_credentials_from_db(db_url)
         if data:
-            return data, "db:latest"
-    try:
-        if os.path.exists(cred_path):
-            with open(cred_path, "r", encoding="utf-8") as f:
-                return json.load(f), "file"
-    except Exception as e:
-        logger.warning(f"[Weixin] Failed to load credentials: {e}")
-    return {}, "none"
+            merged = dict(file_data)
+            merged.update(data)
+            return merged, "db:latest+file" if file_source == "file" else "db:latest"
+
+    return file_data, file_source
 
 
 def _save_credentials(cred_path: str, data: dict):
     """Save credentials to JSON file."""
+    existing = {}
+    try:
+        if os.path.exists(cred_path):
+            with open(cred_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    existing = loaded
+    except Exception:
+        existing = {}
+
+    merged = dict(existing)
+    if isinstance(data, dict):
+        merged.update(data)
+
     db_url = _get_database_url()
     db_saved = False
     if db_url:
-        db_saved = _save_credentials_to_db(db_url, data)
+        db_saved = _save_credentials_to_db(db_url, merged)
     dir_name = os.path.dirname(cred_path)
     if dir_name:
         os.makedirs(dir_name, exist_ok=True)
     try:
         with open(cred_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+            json.dump(merged, f, indent=2, ensure_ascii=False)
     except Exception as e:
         logger.warning(f"[Weixin] Failed to save credentials to file '{cred_path}': {e}")
         raise
@@ -328,6 +355,124 @@ class WeixinChannel(ChatChannel):
         self._current_qr_url = ""
 
         conf()["single_chat_prefix"] = [""]
+
+    @staticmethod
+    def _coerce_bool(value, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "y", "on")
+        return bool(value)
+
+    @staticmethod
+    def _extract_context_token(obj) -> str:
+        if not isinstance(obj, dict):
+            return ""
+        direct = obj.get("context_token") or obj.get("contextToken") or obj.get("contexttoken")
+        if isinstance(direct, str) and direct:
+            return direct
+        for k in ("data", "config", "result", "resp", "payload"):
+            sub = obj.get(k)
+            if isinstance(sub, dict):
+                ct = WeixinChannel._extract_context_token(sub)
+                if ct:
+                    return ct
+        return ""
+
+    def _update_credentials_meta(self, updater):
+        if not self._credentials_path:
+            return
+        try:
+            data = {}
+            if os.path.exists(self._credentials_path):
+                with open(self._credentials_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        data = loaded
+            if not isinstance(data, dict):
+                data = {}
+            updater(data)
+            dir_name = os.path.dirname(self._credentials_path)
+            if dir_name:
+                os.makedirs(dir_name, exist_ok=True)
+            with open(self._credentials_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            try:
+                os.chmod(self._credentials_path, 0o600)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.warning(f"[Weixin] Failed to update credentials meta: {e}")
+
+    def _persist_startup_notify_target(self, to_user_id: str, context_token: str):
+        if not to_user_id or not context_token:
+            return
+
+        def _upd(data: dict):
+            sn = data.get("startup_notify")
+            if not isinstance(sn, dict):
+                sn = {}
+            if sn.get("to_user_id") == to_user_id and sn.get("context_token") == context_token:
+                return
+            sn["to_user_id"] = to_user_id
+            sn["context_token"] = context_token
+            data["startup_notify"] = sn
+
+        self._update_credentials_meta(_upd)
+
+    def _maybe_send_startup_notify(self, creds: dict):
+        enabled = parse_env_bool("WEIXIN_STARTUP_NOTIFY", False)
+        enabled = self._coerce_bool(conf().get("weixin_startup_notify", enabled), enabled)
+        if not enabled:
+            return
+        if not self.api:
+            return
+
+        def _run():
+            try:
+                to_user_id = ""
+                context_token = ""
+                sn = (creds or {}).get("startup_notify")
+                if isinstance(sn, dict):
+                    to_user_id = (sn.get("to_user_id") or "").strip()
+                    context_token = (sn.get("context_token") or "").strip()
+
+                if not to_user_id:
+                    to_user_id = ((creds or {}).get("weixin_startup_notify_to") or "").strip()
+                if not to_user_id:
+                    to_user_id = ((creds or {}).get("user_id") or "").strip()
+
+                if not context_token and to_user_id:
+                    context_token = (self._context_tokens.get(to_user_id) or "").strip()
+
+                if not context_token and to_user_id:
+                    try:
+                        cfg = self.api.get_config(to_user_id, context_token="")
+                        context_token = self._extract_context_token(cfg)
+                    except Exception:
+                        context_token = ""
+
+                if not to_user_id or not context_token:
+                    logger.info("[Weixin] Startup notify skipped (missing to_user_id/context_token)")
+                    return
+
+                text = (os.environ.get("WEIXIN_STARTUP_NOTIFY_TEXT") or "").strip()
+                if not text:
+                    text = str(conf().get("weixin_startup_notify_text", "") or "").strip()
+                if not text:
+                    text = f"✅ CowAgent 微信通道启动成功 ({time.strftime('%Y-%m-%d %H:%M:%S')})"
+
+                self.api.send_text(to_user_id, text, context_token)
+                self._persist_startup_notify_target(to_user_id, context_token)
+                logger.info(f"[Weixin] Startup notify sent to {_mask_id(to_user_id)}")
+            except Exception as e:
+                logger.warning(f"[Weixin] Startup notify failed: {e}")
+
+        threading.Thread(target=_run, daemon=True).start()
 
     # ── Lifecycle ──────────────────────────────────────────────────────
 
@@ -384,6 +529,11 @@ class WeixinChannel(ChatChannel):
                      f"来源={creds_source}，db={db_display}，"
                      f"如需重新扫码登录请删除该文件后重启")
         self.report_startup_success()
+        try:
+            full_creds, _ = _load_credentials(self._credentials_path)
+        except Exception:
+            full_creds = creds
+        self._maybe_send_startup_notify(full_creds)
 
         self._poll_loop()
 
@@ -412,6 +562,29 @@ class WeixinChannel(ChatChannel):
     def _relogin(self) -> bool:
         """Re-login after session expiry. Returns True on success."""
         base_url = self.api.base_url if self.api else DEFAULT_BASE_URL
+        try:
+            current_token = self.api.token if self.api and hasattr(self.api, "token") else ""
+        except Exception:
+            current_token = ""
+
+        try:
+            creds, source = _load_credentials(self._credentials_path)
+        except Exception:
+            creds, source = {}, "unknown"
+
+        new_token = (creds or {}).get("token") or ""
+        new_base_url = (creds or {}).get("base_url") or base_url
+        if new_token and new_token != current_token:
+            self.api = WeixinApi(
+                base_url=new_base_url,
+                token=new_token,
+                cdn_base_url=self.api.cdn_base_url if self.api else CDN_BASE_URL,
+            )
+            self.login_status = self.LOGIN_STATUS_OK
+            self._context_tokens.clear()
+            logger.info(f"[Weixin] Re-login reused saved credentials: source={source}")
+            return True
+
         if os.path.exists(self._credentials_path):
             try:
                 os.remove(self._credentials_path)
@@ -664,6 +837,7 @@ class WeixinChannel(ChatChannel):
 
         if context_token and from_user:
             self._context_tokens[from_user] = context_token
+            self._persist_startup_notify_target(from_user, context_token)
 
         cdn_base_url = self.api.cdn_base_url if self.api else CDN_BASE_URL
         try:
