@@ -862,6 +862,26 @@
                                     <p class="text-sm text-slate-500 dark:text-slate-400 mt-1" data-i18n="tasks_desc">查看和管理定时任务</p>
                                 </div>
                             </div>
+                            <div class="flex items-center gap-3 mb-4">
+                                <label class="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300 select-none cursor-pointer">
+                                    <input id="tasks-show-disabled" type="checkbox" class="sr-only peer">
+                                    <div class="w-9 h-5 bg-slate-200 dark:bg-slate-700 peer-checked:bg-primary-400 rounded-full relative
+                                                after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white
+                                                after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full"></div>
+                                    <span data-i18n="tasks_show_disabled">显示已禁用</span>
+                                </label>
+                                <div class="flex-1"></div>
+                                <span id="tasks-selected-count" class="text-xs text-slate-400 dark:text-slate-500 hidden"></span>
+                                <button id="tasks-delete-selected"
+                                        class="px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 hover:bg-slate-50 dark:hover:bg-white/5 text-sm text-slate-600 dark:text-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        data-i18n="tasks_delete_selected">删除选中</button>
+                                <button id="tasks-delete-all"
+                                        class="px-3 py-2 rounded-lg bg-rose-500 hover:bg-rose-600 text-white text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                                        data-i18n="tasks_delete_all">删除全部</button>
+                                <button id="tasks-refresh"
+                                        class="px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 hover:bg-slate-50 dark:hover:bg-white/5 text-sm text-slate-600 dark:text-slate-200"
+                                        data-i18n="tasks_refresh">刷新</button>
+                            </div>
                             <div id="tasks-empty" class="flex flex-col items-center justify-center py-20">
                                 <div class="w-16 h-16 rounded-2xl bg-rose-50 dark:bg-rose-900/20 flex items-center justify-center mb-4">
                                     <i class="fas fa-clock text-rose-400 text-xl"></i>

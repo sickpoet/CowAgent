@@ -544,6 +544,30 @@ class WebChannel(ChatChannel):
         logging.getLogger("web.httpserver").setLevel(logging.ERROR)
 
         # Build WSGI app with middleware (same as runsimple but without print)
+        def _api_error_wrapper(handler):
+            try:
+                return handler()
+            except web.HTTPError as e:
+                try:
+                    path = getattr(web.ctx, "path", "") or ""
+                    if path.startswith("/api/") and getattr(e, "data", None):
+                        web.header('Content-Type', 'application/json; charset=utf-8')
+                        return e.data
+                except Exception:
+                    pass
+                raise
+            except Exception as e:
+                try:
+                    path = getattr(web.ctx, "path", "") or ""
+                    if path.startswith("/api/"):
+                        web.header('Content-Type', 'application/json; charset=utf-8')
+                        logger.error(f"[WebChannel] API uncaught error: {e}")
+                        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+                except Exception:
+                    pass
+                raise
+
+        app.add_processor(_api_error_wrapper)
         func = web.httpserver.StaticMiddleware(app.wsgifunc())
         func = web.httpserver.LogMiddleware(func)
         server = web.httpserver.WSGIServer(("0.0.0.0", port), func)
@@ -1573,6 +1597,70 @@ class SchedulerHandler:
         except Exception as e:
             logger.error(f"[WebChannel] Scheduler API error: {e}")
             return json.dumps({"status": "error", "message": str(e)})
+
+    def POST(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            body = json.loads(web.data() or "{}")
+            action = (body.get("action") or "").strip()
+
+            from agent.tools.scheduler.task_store import TaskStore
+            workspace_root = _get_workspace_root()
+            store_path = os.path.join(workspace_root, "scheduler", "tasks.db")
+            store = TaskStore(store_path)
+
+            if action == "set_enabled":
+                task_id = (body.get("id") or "").strip()
+                if not task_id:
+                    return json.dumps({"status": "error", "message": "id required"}, ensure_ascii=False)
+                enabled = bool(body.get("enabled", True))
+                store.enable_task(task_id, enabled=enabled)
+                return json.dumps({"status": "success"}, ensure_ascii=False)
+
+            if action == "delete":
+                task_id = (body.get("id") or "").strip()
+                if not task_id:
+                    return json.dumps({"status": "error", "message": "id required"}, ensure_ascii=False)
+                store.delete_task(task_id)
+                return json.dumps({"status": "success"}, ensure_ascii=False)
+
+            if action == "delete_many":
+                ids = body.get("ids") or []
+                if not isinstance(ids, list) or not ids:
+                    return json.dumps({"status": "error", "message": "ids required"}, ensure_ascii=False)
+                deleted = 0
+                for tid in ids:
+                    task_id = str(tid or "").strip()
+                    if not task_id:
+                        continue
+                    try:
+                        store.delete_task(task_id)
+                        deleted += 1
+                    except Exception:
+                        continue
+                return json.dumps({"status": "success", "deleted": deleted}, ensure_ascii=False)
+
+            if action == "delete_all":
+                tasks = store.list_tasks()
+                deleted = 0
+                for t in (tasks or []):
+                    if not isinstance(t, dict):
+                        continue
+                    task_id = str(t.get("id", "")).strip()
+                    if not task_id:
+                        continue
+                    try:
+                        store.delete_task(task_id)
+                        deleted += 1
+                    except Exception:
+                        continue
+                return json.dumps({"status": "success", "deleted": deleted}, ensure_ascii=False)
+
+            return json.dumps({"status": "error", "message": f"unknown action: {action}"}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] Scheduler POST error: {e}")
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
 
 
 class SessionsHandler:

@@ -79,6 +79,13 @@ const I18N = {
         wecom_scan_fail: '创建失败',
         wecom_mode_scan: '扫码接入', wecom_mode_manual: '手动填写',
         tasks_title: '定时任务', tasks_desc: '查看和管理定时任务',
+        tasks_show_disabled: '显示已禁用',
+        tasks_delete_selected: '删除选中',
+        tasks_delete_all: '删除全部',
+        tasks_refresh: '刷新',
+        tasks_confirm_delete_selected: '确认删除选中的定时任务？',
+        tasks_confirm_delete_all: '确认删除所有定时任务？',
+        tasks_delete_title: '删除定时任务',
         tasks_coming: '即将推出', tasks_coming_desc: '定时任务管理功能即将在此提供',
         logs_title: '日志', logs_desc: '实时日志输出 (run.log)',
         logs_live: '实时', logs_coming_msg: '日志流即将在此提供。将连接 run.log 实现类似 tail -f 的实时输出。',
@@ -103,6 +110,13 @@ const I18N = {
         menu_chat: 'Chat', menu_config: 'Config', menu_skills: 'Skills',
         menu_memory: 'Memory', menu_knowledge: 'Knowledge', menu_channels: 'Channels', menu_tasks: 'Tasks',
         menu_logs: 'Logs',
+        tasks_show_disabled: 'Show disabled',
+        tasks_delete_selected: 'Delete selected',
+        tasks_delete_all: 'Delete all',
+        tasks_refresh: 'Refresh',
+        tasks_confirm_delete_selected: 'Delete selected tasks?',
+        tasks_confirm_delete_all: 'Delete all scheduled tasks?',
+        tasks_delete_title: 'Delete tasks',
         knowledge_title: 'Knowledge', knowledge_desc: 'Browse and explore your knowledge base',
         knowledge_tab_docs: 'Documents', knowledge_tab_graph: 'Graph',
         knowledge_loading: 'Loading knowledge base...', knowledge_loading_desc: 'Knowledge pages will be displayed here',
@@ -2738,13 +2752,27 @@ function loadChannelsView() {
     container.innerHTML = `<div class="flex items-center gap-2 py-8 justify-center text-slate-400 dark:text-slate-500 text-sm">
         <i class="fas fa-spinner fa-spin text-xs"></i><span>Loading...</span></div>`;
 
-    fetch('/api/channels').then(r => r.json()).then(data => {
-        if (data.status !== 'success') return;
-        channelsData = data.channels || [];
-        renderActiveChannels();
-    }).catch(() => {
-        container.innerHTML = '<p class="text-sm text-red-400 py-8 text-center">Failed to load channels</p>';
-    });
+    fetch('/api/channels')
+        .then(r => r.text().then(text => ({ ok: r.ok, status: r.status, text })))
+        .then(({ ok, status, text }) => {
+            let data = null;
+            try { data = JSON.parse(text); } catch (e) {}
+            if (!ok) {
+                const msg = (data && data.message) ? data.message : (text || `HTTP ${status}`);
+                container.innerHTML = `<p class="text-sm text-red-400 py-8 text-center">${msg}</p>`;
+                return;
+            }
+            if (!data || data.status !== 'success') {
+                const msg = (data && data.message) ? data.message : 'Failed to load channels';
+                container.innerHTML = `<p class="text-sm text-red-400 py-8 text-center">${msg}</p>`;
+                return;
+            }
+            channelsData = data.channels || [];
+            renderActiveChannels();
+        })
+        .catch(() => {
+            container.innerHTML = '<p class="text-sm text-red-400 py-8 text-center">Failed to load channels</p>';
+        });
 }
 
 function renderActiveChannels() {
@@ -3144,19 +3172,25 @@ function stopWeixinStatusPoll() {
 function startWeixinActiveStatusPoll() {
     stopWeixinStatusPoll();
     _weixinStatusPollTimer = setTimeout(() => {
-        fetch('/api/channels').then(r => r.json()).then(data => {
-            if (data.status !== 'success') return;
-            const wx = (data.channels || []).find(c => c.name === 'weixin');
-            if (!wx || !wx.active) return;
-            if (wx.login_status === 'logged_in') {
-                channelsData = data.channels;
-                renderActiveChannels();
-            } else {
-                const ch = channelsData.find(c => c.name === 'weixin');
-                if (ch) ch.login_status = wx.login_status;
-                startWeixinActiveStatusPoll();
-            }
-        }).catch(() => { startWeixinActiveStatusPoll(); });
+        fetch('/api/channels')
+            .then(r => r.text().then(text => ({ ok: r.ok, status: r.status, text })))
+            .then(({ ok, text }) => {
+                if (!ok) return;
+                let data = null;
+                try { data = JSON.parse(text); } catch (e) {}
+                if (!data || data.status !== 'success') return;
+                const wx = (data.channels || []).find(c => c.name === 'weixin');
+                if (!wx || !wx.active) return;
+                if (wx.login_status === 'logged_in') {
+                    channelsData = data.channels;
+                    renderActiveChannels();
+                } else {
+                    const ch = channelsData.find(c => c.name === 'weixin');
+                    if (ch) ch.login_status = wx.login_status;
+                    startWeixinActiveStatusPoll();
+                }
+            })
+            .catch(() => { startWeixinActiveStatusPoll(); });
     }, 3000);
 }
 
@@ -3482,7 +3516,216 @@ document.addEventListener('DOMContentLoaded', function() {
 // =====================================================================
 // Scheduler View
 // =====================================================================
+let tasksData = [];
+let tasksSelectedIds = new Set();
+let tasksShowDisabled = false;
+
+function _setTasksSelectedCount() {
+    const el = document.getElementById('tasks-selected-count');
+    if (!el) return;
+    const n = tasksSelectedIds.size;
+    if (!n) {
+        el.classList.add('hidden');
+        el.textContent = '';
+        return;
+    }
+    el.classList.remove('hidden');
+    el.textContent = currentLang === 'zh' ? `已选 ${n}` : `${n} selected`;
+}
+
+function _updateTasksDeleteSelectedBtn() {
+    const btn = document.getElementById('tasks-delete-selected');
+    if (!btn) return;
+    btn.disabled = tasksSelectedIds.size === 0;
+}
+
+function _initTasksToolbar() {
+    const toggle = document.getElementById('tasks-show-disabled');
+    if (toggle && !toggle.dataset.bound) {
+        toggle.dataset.bound = '1';
+        toggle.addEventListener('change', () => {
+            tasksShowDisabled = !!toggle.checked;
+            tasksSelectedIds = new Set();
+            _setTasksSelectedCount();
+            _updateTasksDeleteSelectedBtn();
+            _renderTasksList();
+        });
+    }
+
+    const btnSelected = document.getElementById('tasks-delete-selected');
+    if (btnSelected && !btnSelected.dataset.bound) {
+        btnSelected.dataset.bound = '1';
+        btnSelected.addEventListener('click', () => {
+            const ids = Array.from(tasksSelectedIds);
+            if (!ids.length) return;
+            showConfirmDialog(
+                t('tasks_delete_title'),
+                t('tasks_confirm_delete_selected'),
+                () => {
+                    fetch('/api/scheduler', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ action: 'delete_many', ids })
+                    })
+                    .then(r => r.json())
+                    .then(() => loadTasksView())
+                    .catch(() => {});
+                }
+            );
+        });
+    }
+
+    const btnAll = document.getElementById('tasks-delete-all');
+    if (btnAll && !btnAll.dataset.bound) {
+        btnAll.dataset.bound = '1';
+        btnAll.addEventListener('click', () => {
+            showConfirmDialog(
+                t('tasks_delete_title'),
+                t('tasks_confirm_delete_all'),
+                () => {
+                    fetch('/api/scheduler', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ action: 'delete_all' })
+                    })
+                    .then(r => r.json())
+                    .then(() => loadTasksView())
+                    .catch(() => {});
+                }
+            );
+        });
+    }
+
+    const btnRefresh = document.getElementById('tasks-refresh');
+    if (btnRefresh && !btnRefresh.dataset.bound) {
+        btnRefresh.dataset.bound = '1';
+        btnRefresh.addEventListener('click', () => loadTasksView());
+    }
+}
+
+function _renderTasksList() {
+    const emptyEl = document.getElementById('tasks-empty');
+    const listEl = document.getElementById('tasks-list');
+    if (!emptyEl || !listEl) return;
+
+    const tasks = tasksShowDisabled ? tasksData : (tasksData || []).filter(t => t && t.enabled !== false);
+    if (!tasks || tasks.length === 0) {
+        emptyEl.classList.remove('hidden');
+        listEl.classList.add('hidden');
+        emptyEl.querySelector('p').textContent = currentLang === 'zh' ? '暂无定时任务' : 'No scheduled tasks';
+        return;
+    }
+
+    emptyEl.classList.add('hidden');
+    listEl.classList.remove('hidden');
+    listEl.innerHTML = '';
+
+    tasks.forEach(task => {
+        const id = String(task.id || '');
+        const enabled = task.enabled !== false;
+        const schedule = task.schedule || {};
+        const action = task.action || {};
+
+        const scheduleType = schedule.type || 'once';
+        let scheduleVal = '';
+        if (scheduleType === 'cron') scheduleVal = schedule.expression || '';
+        else if (scheduleType === 'interval') {
+            const v = schedule.interval;
+            scheduleVal = (v === undefined || v === null || v === '') ? '' : String(v) + 's';
+        } else if (scheduleType === 'once') scheduleVal = schedule.at || '';
+
+        const typeLabel = `<span class="text-xs font-mono text-slate-400">${escapeHtml(scheduleType)}${scheduleVal ? ': ' + escapeHtml(scheduleVal) : ''}</span>`;
+
+        let nextRun = '--';
+        if (task.next_run_at) {
+            nextRun = formatDateTimeBeijing(task.next_run_at);
+        }
+
+        const description = action.content || action.task_description || task.name || task.id || '';
+
+        const dotCls = enabled ? 'bg-primary-400' : 'bg-slate-300 dark:bg-slate-600';
+        const nameCls = enabled ? 'text-slate-700 dark:text-slate-200' : 'text-slate-400 dark:text-slate-500';
+        const selected = tasksSelectedIds.has(id) ? 'checked' : '';
+
+        const card = document.createElement('div');
+        card.className = 'bg-white dark:bg-[#1A1A1A] rounded-xl border border-slate-200 dark:border-white/10 p-4';
+        card.innerHTML = `
+            <div class="flex items-center gap-2 mb-2">
+                <input type="checkbox" class="w-4 h-4 rounded border-slate-300 dark:border-slate-600"
+                       data-task-select="1" data-task-id="${escapeHtml(id)}" ${selected}>
+                <span class="w-2 h-2 rounded-full ${dotCls}"></span>
+                <span class="font-medium text-sm ${nameCls}">${escapeHtml(task.name || task.id || '--')}</span>
+                <div class="flex-1"></div>
+                ${typeLabel}
+                <label class="relative inline-flex items-center cursor-pointer ml-2">
+                    <input type="checkbox" class="sr-only peer" data-task-toggle="1" data-task-id="${escapeHtml(id)}" ${enabled ? 'checked' : ''}>
+                    <div class="w-9 h-5 bg-slate-200 dark:bg-slate-700 peer-checked:bg-primary-400 rounded-full
+                                after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white
+                                after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full"></div>
+                </label>
+                <button class="ml-2 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-white/10 hover:bg-slate-50 dark:hover:bg-white/5 text-xs text-rose-500"
+                        data-task-delete="1" data-task-id="${escapeHtml(id)}">
+                    ${currentLang === 'zh' ? '删除' : 'Delete'}
+                </button>
+            </div>
+            <p class="text-xs text-slate-500 dark:text-slate-400 mb-2 line-clamp-2">${escapeHtml(description)}</p>
+            <div class="flex items-center gap-4 text-xs text-slate-400 dark:text-slate-500">
+                <span><i class="fas fa-clock mr-1"></i>${currentLang === 'zh' ? '下次执行' : 'Next run'}: ${nextRun}</span>
+            </div>`;
+        listEl.appendChild(card);
+    });
+
+    listEl.querySelectorAll('input[data-task-select="1"]').forEach(inp => {
+        inp.addEventListener('change', () => {
+            const id = String(inp.dataset.taskId || '');
+            if (!id) return;
+            if (inp.checked) tasksSelectedIds.add(id);
+            else tasksSelectedIds.delete(id);
+            _setTasksSelectedCount();
+            _updateTasksDeleteSelectedBtn();
+        });
+    });
+
+    listEl.querySelectorAll('input[data-task-toggle="1"]').forEach(inp => {
+        inp.addEventListener('change', () => {
+            const id = String(inp.dataset.taskId || '');
+            if (!id) return;
+            const enabled = !!inp.checked;
+            fetch('/api/scheduler', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'set_enabled', id, enabled })
+            })
+            .then(r => r.json())
+            .then(() => loadTasksView())
+            .catch(() => loadTasksView());
+        });
+    });
+
+    listEl.querySelectorAll('button[data-task-delete="1"]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const id = String(btn.dataset.taskId || '');
+            if (!id) return;
+            showConfirmDialog(
+                t('tasks_delete_title'),
+                currentLang === 'zh' ? '确认删除该定时任务？' : 'Delete this task?',
+                () => {
+                    fetch('/api/scheduler', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ action: 'delete', id })
+                    })
+                    .then(r => r.json())
+                    .then(() => loadTasksView())
+                    .catch(() => {});
+                }
+            );
+        });
+    });
+}
+
 function loadTasksView() {
+    _initTasksToolbar();
     fetch('/api/scheduler').then(r => r.json()).then(data => {
         const emptyEl = document.getElementById('tasks-empty');
         const listEl = document.getElementById('tasks-list');
@@ -3493,55 +3736,11 @@ function loadTasksView() {
             return;
         }
         
-        const allTasks = data.tasks || [];
-        // Only show active (enabled) tasks
-        const tasks = allTasks.filter(t => t.enabled !== false);
-        if (tasks.length === 0) {
-            emptyEl.classList.remove('hidden');
-            listEl.classList.add('hidden');
-            emptyEl.querySelector('p').textContent = currentLang === 'zh' ? '暂无定时任务' : 'No scheduled tasks';
-            return;
-        }
-        
-        emptyEl.classList.add('hidden');
-        listEl.classList.remove('hidden');
-        listEl.innerHTML = '';
-
-        tasks.forEach(task => {
-            const card = document.createElement('div');
-            card.className = 'bg-white dark:bg-[#1A1A1A] rounded-xl border border-slate-200 dark:border-white/10 p-4';
-            
-            const schedule = task.schedule || {};
-            const action = task.action || {};
-            
-            const scheduleType = schedule.type || 'once';
-            let scheduleVal = '';
-            if (scheduleType === 'cron') scheduleVal = schedule.expression || '';
-            else if (scheduleType === 'interval') scheduleVal = schedule.interval + 's';
-            else if (scheduleType === 'once') scheduleVal = schedule.at || '';
-
-            const typeLabel = `<span class="text-xs font-mono text-slate-400">${escapeHtml(scheduleType)}${scheduleVal ? ': ' + escapeHtml(scheduleVal) : ''}</span>`;
-            
-            let nextRun = '--';
-            if (task.next_run_at) {
-                nextRun = formatDateTimeBeijing(task.next_run_at);
-            }
-            
-            const description = action.content || action.task_description || task.name || task.id || '';
-            
-            card.innerHTML = `
-                <div class="flex items-center gap-2 mb-2">
-                    <span class="w-2 h-2 rounded-full bg-primary-400"></span>
-                    <span class="font-medium text-sm text-slate-700 dark:text-slate-200">${escapeHtml(task.name || task.id || '--')}</span>
-                    <div class="flex-1"></div>
-                    ${typeLabel}
-                </div>
-                <p class="text-xs text-slate-500 dark:text-slate-400 mb-2 line-clamp-2">${escapeHtml(description)}</p>
-                <div class="flex items-center gap-4 text-xs text-slate-400 dark:text-slate-500">
-                    <span><i class="fas fa-clock mr-1"></i>${currentLang === 'zh' ? '下次执行' : 'Next run'}: ${nextRun}</span>
-                </div>`;
-            listEl.appendChild(card);
-        });
+        tasksData = data.tasks || [];
+        tasksSelectedIds = new Set();
+        _setTasksSelectedCount();
+        _updateTasksDeleteSelectedBtn();
+        _renderTasksList();
     }).catch(err => {
         const emptyEl = document.getElementById('tasks-empty');
         if (emptyEl) emptyEl.querySelector('p').textContent = err.message || 'Network error';
