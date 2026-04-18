@@ -145,26 +145,31 @@ class SchedulerTool(BaseTool):
         
         if not self._ensure_task_store():
             return ToolResult.fail("错误: 定时任务系统未初始化")
+
+        def _wrap(text: str) -> ToolResult:
+            if isinstance(text, str) and (text.startswith("错误:") or text.startswith("Error:")):
+                return ToolResult.fail(text)
+            return ToolResult.success(text)
         
         try:
             if action == "create":
                 result = self._create_task(**kwargs)
-                return ToolResult.success(result)
+                return _wrap(result)
             elif action == "list":
                 result = self._list_tasks(**kwargs)
-                return ToolResult.success(result)
+                return _wrap(result)
             elif action == "get":
                 result = self._get_task(**kwargs)
-                return ToolResult.success(result)
+                return _wrap(result)
             elif action == "delete":
                 result = self._delete_task(**kwargs)
-                return ToolResult.success(result)
+                return _wrap(result)
             elif action == "enable":
                 result = self._enable_task(**kwargs)
-                return ToolResult.success(result)
+                return _wrap(result)
             elif action == "disable":
                 result = self._disable_task(**kwargs)
-                return ToolResult.success(result)
+                return _wrap(result)
             else:
                 return ToolResult.fail(f"未知操作: {action}")
         except Exception as e:
@@ -252,6 +257,13 @@ class SchedulerTool(BaseTool):
         self.task_store.add_task(task_data)
         backend = getattr(self.task_store, "backend", "unknown")
         logger.info(f"[SchedulerTool] create: persisted task id={task_id} name='{name}' backend={backend}")
+
+        try:
+            persisted = self.task_store.get_task(task_id)
+        except Exception:
+            persisted = None
+        if not persisted:
+            return f"错误: 任务创建后未能从存储中读回确认 (id={task_id}, backend={backend})"
         
         # Format response
         schedule_desc = self._format_schedule_description(schedule)

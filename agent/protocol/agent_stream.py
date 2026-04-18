@@ -361,6 +361,12 @@ class AgentStreamExecutor:
                             final_response = assistant_msg
                             if tool_calls:
                                 continue
+                            if self._should_force_scheduler_list(user_message) and self._response_claims_tool_use(assistant_msg):
+                                tool_id = f"forced_scheduler_list_{int(time.time() * 1000)}"
+                                tool_call = {"id": tool_id, "name": "scheduler", "arguments": {"action": "list"}}
+                                logger.info("🔧 scheduler(action=list)")
+                                result = self._execute_tool(tool_call)
+                                return self._append_tool_use_and_result(tool_call, result)
                         logger.info(f"💭 {assistant_msg[:150]}{'...' if len(assistant_msg) > 150 else ''}")
                     
                     logger.debug(f"✅ 完成 (无工具调用)")
